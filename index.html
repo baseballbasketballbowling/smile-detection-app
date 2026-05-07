@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Smile Shutter</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+
+    <header id="header">
+      <div class="header-left">
+        <h1>Smile Shutter</h1>
+        <span id="status-badge" class="badge badge-idle">待機中</span>
+      </div>
+      <div class="header-right">
+        <button id="start-btn" class="btn btn-primary">開始</button>
+        <button id="stop-btn"  class="btn btn-secondary" style="display:none">停止</button>
+      </div>
+    </header>
+
+    <main id="main">
+
+      <!-- ─── Camera Column ─── -->
+      <section id="camera-col">
+
+        <div id="camera-wrapper">
+          <video id="video" autoplay muted playsinline></video>
+          <div id="flash-overlay"></div>
+          <button id="camera-switch-btn" class="cam-overlay-btn" style="display:none" title="カメラ切替">↺</button>
+          <div id="smile-overlay">
+            <div id="smile-meter-wrap">
+              <div id="smile-meter-fill"></div>
+              <div id="smile-meter-threshold"></div>
+            </div>
+            <span id="smile-score-text">--</span>
+          </div>
+        </div>
+
+        <div id="controls-bar">
+          <button id="manual-btn" class="btn btn-shutter" disabled>📷 手動</button>
+          <div class="control-group">
+            <label class="ctrl-label">
+              感度
+              <input type="range" id="threshold-range" min="40" max="90" value="72">
+              <span id="threshold-val">72%</span>
+            </label>
+            <label class="ctrl-label">
+              間隔
+              <input type="range" id="interval-range" min="200" max="1000" step="100" value="500">
+              <span id="interval-val">500ms</span>
+            </label>
+            <label class="ctrl-label">
+              待機
+              <input type="range" id="cooldown-range" min="1000" max="8000" step="500" value="3000">
+              <span id="cooldown-val">3.0s</span>
+            </label>
+          </div>
+        </div>
+
+        <div id="status-bar">
+          <span id="status-text">「開始」を押してカメラを起動してください</span>
+          <span id="api-indicator"></span>
+        </div>
+
+      </section>
+
+      <!-- ─── Gallery Column ─── -->
+      <section id="gallery-col">
+
+        <div id="best-shot-section" style="display:none">
+          <p class="section-label">⭐ ベストショット <span id="best-shot-sub">直近10枚より</span></p>
+          <div id="best-shot-card"></div>
+        </div>
+
+        <div class="gallery-header">
+          <h2>撮影履歴</h2>
+          <button id="clear-btn" class="btn btn-ghost">クリア</button>
+        </div>
+        <div id="gallery-grid"></div>
+        <p id="gallery-empty">まだ写真がありません</p>
+
+      </section>
+
+    </main>
+  </div>
+
+  <canvas id="capture-canvas"></canvas>
+  <canvas id="api-canvas"></canvas>
+
+  <script src="app.js"></script>
+</body>
+</html>
