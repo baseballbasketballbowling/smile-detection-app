@@ -6,11 +6,10 @@ const CONFIG = {
   CAPTURE_INTERVAL:  500,
   SMILE_THRESHOLD:   0.72,
   COOLDOWN_MS:       3000,
-  CAPTURE_W:         640,
-  CAPTURE_H:         480,
   API_W:             320,
   API_H:             240,
   API_QUALITY:       0.75,
+  PHOTO_QUALITY:     0.95,
 };
 
 // ============================================================
@@ -22,8 +21,11 @@ let captureTimer   = null;
 let isInCooldown   = false;
 let batchPending   = false;
 let frameIdCounter = 0;
-let frameBuffer    = [];
-let shotHistory    = [];
+let frameBuffer        = [];
+let shotHistory        = [];
+let deviceList         = [];
+let activeDeviceId     = null;
+let currentDeviceIndex = -1;
 
 // ============================================================
 // DOM
@@ -61,26 +63,36 @@ const capCtx    = capCanvas.getContext('2d');
 const apiCanvas = $('api-canvas');
 const apiCtx    = apiCanvas.getContext('2d');
 
-capCanvas.width  = CONFIG.CAPTURE_W;
-capCanvas.height = CONFIG.CAPTURE_H;
-apiCanvas.width  = CONFIG.API_W;
-apiCanvas.height = CONFIG.API_H;
+// Canvas dimensions are set dynamically when camera starts (video.onloadedmetadata)
 
 // ============================================================
 // CAMERA
 // ============================================================
 async function startCamera() {
-  const stream = await navigator.mediaDevices.getUserMedia({
-    video: {
-      width:      { ideal: CONFIG.CAPTURE_W },
-      height:     { ideal: CONFIG.CAPTURE_H },
-      facingMode: facingMode,
-    },
-    audio: false,
-  });
+  const videoConstraints = (currentDeviceIndex >= 0 && deviceList[currentDeviceIndex])
+    ? { deviceId: { exact: deviceList[currentDeviceIndex].deviceId } }
+    : { facingMode, width: { ideal: 1920 }, height: { ideal: 1080 } };
+
+  const stream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints, audio: false });
   video.srcObject = stream;
-  video.style.transform = facingMode === 'user' ? 'scaleX(-1)' : 'none';
-  return new Promise(resolve => { video.onloadedmetadata = resolve; });
+
+  const track    = stream.getVideoTracks()[0];
+  activeDeviceId = track?.getSettings()?.deviceId ?? null;
+  const facing   = track?.getSettings()?.facingMode ?? (facingMode === 'user' ? 'user' : 'environment');
+  video.style.transform = facing === 'user' ? 'scaleX(-1)' : 'none';
+
+  return new Promise(resolve => {
+    video.onloadedmetadata = () => {
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      capCanvas.width  = vw;
+      capCanvas.height = vh;
+      const scale = Math.min(CONFIG.API_W / vw, CONFIG.API_H / vh);
+      apiCanvas.width  = Math.round(vw * scale);
+      apiCanvas.height = Math.round(vh * scale);
+      resolve();
+    };
+  });
 }
 
 function stopCamera() {
@@ -91,18 +103,34 @@ function stopCamera() {
 async function switchCamera() {
   if (!isRunning || cameraSwitchBtn.disabled) return;
   cameraSwitchBtn.disabled = true;
-  const prev = facingMode;
-  facingMode = facingMode === 'user' ? 'environment' : 'user';
   stopCamera();
   frameBuffer  = [];
   batchPending = false;
+
+  if (deviceList.length === 0) {
+    try {
+      const all = await navigator.mediaDevices.enumerateDevices();
+      deviceList = all.filter(d => d.kind === 'videoinput');
+    } catch (_) {}
+  }
+
+  if (deviceList.length <= 1) {
+    facingMode = facingMode === 'user' ? 'environment' : 'user';
+    currentDeviceIndex = -1;
+  } else {
+    const cur = activeDeviceId ? deviceList.findIndex(d => d.deviceId === activeDeviceId) : -1;
+    currentDeviceIndex = (cur + 1) % deviceList.length;
+  }
+
   try {
     await startCamera();
-    setStatus('カメラを切り替えました');
+    const label = deviceList[currentDeviceIndex]?.label || 'カメラを切り替えました';
+    setStatus(label);
   } catch {
-    facingMode = prev;
+    setStatus('カメラが切り替えられませんでした', 'error');
+    currentDeviceIndex = -1;
+    facingMode = 'user';
     try { await startCamera(); } catch (_) {}
-    setStatus('カメラが1つしかありません', 'error');
   } finally {
     cameraSwitchBtn.disabled = false;
   }
@@ -116,10 +144,10 @@ function captureFrame() {
 
   const frameId = frameIdCounter++;
 
-  capCtx.drawImage(video, 0, 0, CONFIG.CAPTURE_W, CONFIG.CAPTURE_H);
-  const fullDataUrl = capCanvas.toDataURL('image/jpeg', 0.92);
+  capCtx.drawImage(video, 0, 0, capCanvas.width, capCanvas.height);
+  const fullDataUrl = capCanvas.toDataURL('image/jpeg', CONFIG.PHOTO_QUALITY);
 
-  apiCtx.drawImage(video, 0, 0, CONFIG.API_W, CONFIG.API_H);
+  apiCtx.drawImage(video, 0, 0, apiCanvas.width, apiCanvas.height);
   const apiBase64 = apiCanvas.toDataURL('image/jpeg', CONFIG.API_QUALITY).split(',')[1];
 
   frameBuffer.push({ id: frameId, fullDataUrl, apiBase64, ts: Date.now() });
