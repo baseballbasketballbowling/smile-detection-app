@@ -1,6 +1,6 @@
 # Simple HTTP server using built-in .NET — no Node.js or Python needed
 $port   = 3000
-$root   = $PSScriptRoot
+$root   = Join-Path $PSScriptRoot "public"
 $prefix = "http://localhost:$port/"
 
 $listener = [System.Net.HttpListener]::new()
