@@ -181,9 +181,10 @@ async function analyzeBatch(batch) {
       `These are ${batch.length} frames captured 0.5s apart. Each frame may contain multiple people.`,
       `For EACH frame:`,
       `  (1) "scores": highest smile score among all faces (0.0=no smile, 1.0=big genuine smile, no faces=0.0)`,
-      `  (2) "smiling": count of people clearly smiling (smile score > 0.5)`,
+      `  (2) "faces": total number of faces detected (0 if none)`,
+      `  (3) "smiling": count of people clearly smiling (smile score > 0.5)`,
       `Reply ONLY with valid JSON — no markdown, no explanation:`,
-      `{"scores":[${Array(batch.length).fill('0.0').join(',')}],"smiling":[${Array(batch.length).fill('0').join(',')}]}`,
+      `{"scores":[${Array(batch.length).fill('0.0').join(',')}],"faces":[${Array(batch.length).fill('0').join(',')}],"smiling":[${Array(batch.length).fill('0').join(',')}]}`,
     ].join('\n'),
   });
 
@@ -212,11 +213,14 @@ async function analyzeBatch(batch) {
     const scores  = Array.isArray(parsed.scores)
       ? parsed.scores.map(s => Math.min(1, Math.max(0, parseFloat(s) || 0)))
       : [];
+    const faces   = Array.isArray(parsed.faces)
+      ? parsed.faces.map(n => Math.max(0, parseInt(n) || 0))
+      : scores.map(() => 0);
     const smiling = Array.isArray(parsed.smiling)
       ? parsed.smiling.map(n => Math.max(0, parseInt(n) || 0))
       : scores.map(() => 0);
 
-    onBatchResult(scores, smiling, batch);
+    onBatchResult(scores, smiling, faces, batch);
 
   } catch (e) {
     errorOccurred = true;
@@ -238,29 +242,30 @@ async function analyzeBatch(batch) {
 // ============================================================
 // BATCH RESULT
 // ============================================================
-function onBatchResult(scores, smilingCounts, batch) {
+function onBatchResult(scores, smilingCounts, faceCounts, batch) {
   if (!isRunning || scores.length === 0) return;
 
-  let bestScore = 0, bestIndex = 0, bestSmiling = 0;
+  let bestScore = 0, bestIndex = 0, bestSmiling = 0, bestFaces = 0;
   scores.forEach((s, i) => {
     if (s > bestScore) {
       bestScore   = s;
       bestIndex   = i;
       bestSmiling = smilingCounts[i] ?? 0;
+      bestFaces   = faceCounts[i] ?? 0;
     }
   });
 
-  updateSmileBar(bestScore, bestSmiling);
+  updateSmileBar(bestScore, bestSmiling, bestFaces);
 
   if (!isInCooldown && bestScore >= CONFIG.SMILE_THRESHOLD) {
-    triggerShutter(batch[bestIndex].fullDataUrl, bestScore, Math.max(1, bestSmiling));
+    triggerShutter(batch[bestIndex].fullDataUrl, bestScore, Math.max(1, bestSmiling), bestFaces);
   }
 }
 
 // ============================================================
 // SHUTTER
 // ============================================================
-function triggerShutter(dataUrl, score, smiling = 1) {
+function triggerShutter(dataUrl, score, smiling = 1, faces = 0) {
   if (isInCooldown) return;
   isInCooldown = true;
   frameBuffer  = [];
@@ -269,14 +274,14 @@ function triggerShutter(dataUrl, score, smiling = 1) {
   cameraWrapper.classList.add('pulse');
   setTimeout(() => cameraWrapper.classList.remove('pulse'), 600);
 
-  addToGallery(dataUrl, score, smiling);
+  addToGallery(dataUrl, score, smiling, faces);
 
-  shotHistory.unshift({ dataUrl, score, smiling, ts: Date.now() });
+  shotHistory.unshift({ dataUrl, score, smiling, faces, ts: Date.now() });
   if (shotHistory.length > 10) shotHistory.pop();
   updateBestShot();
 
   setBadge('cooldown');
-  const smilingLabel = smiling > 1 ? ` / ${smiling}人笑顔` : '';
+  const smilingLabel = faces > 1 ? ` / ${smiling}人笑顔` : '';
   setStatus(`撮影完了！ ${Math.round(score * 100)}%${smilingLabel}  — ${(CONFIG.COOLDOWN_MS / 1000).toFixed(1)}秒後に再開`);
 
   setTimeout(() => {
@@ -309,14 +314,14 @@ function updateBestShot() {
   const info  = document.createElement('div');
   info.className = 'best-shot-info';
   info.innerHTML = `<span class="best-shot-score">${Math.round(best.score * 100)}%</span>
-    <span class="best-shot-people">${best.smiling > 1 ? `笑顔 ${best.smiling}人` : ''}</span>`;
+    <span class="best-shot-people">${(best.faces ?? 0) > 1 ? `笑顔 ${best.smiling}人` : ''}</span>`;
   bestShotCard.append(img, badge, info);
 }
 
 // ============================================================
 // GALLERY
 // ============================================================
-function addToGallery(dataUrl, score, smiling) {
+function addToGallery(dataUrl, score, smiling, faces = 0) {
   galleryEmpty.style.display = 'none';
   const item = document.createElement('div');
   item.className = 'gallery-item';
@@ -324,7 +329,7 @@ function addToGallery(dataUrl, score, smiling) {
   const info = document.createElement('div');
   info.className = 'gallery-item-info';
   const ts = new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  const smilingTxt = smiling > 1 ? `<span class="gallery-smiling">${smiling}人</span>` : '';
+  const smilingTxt = faces > 1 ? `<span class="gallery-smiling">${smiling}人</span>` : '';
   info.innerHTML = `<span class="gallery-time">${ts}</span>${smilingTxt}<span class="gallery-score">${Math.round(score * 100)}%</span>`;
   const dlBtn = Object.assign(document.createElement('button'), { className: 'dl-btn', textContent: '⬇ 保存' });
   dlBtn.onclick = e => {
@@ -338,9 +343,9 @@ function addToGallery(dataUrl, score, smiling) {
 // ============================================================
 // UI HELPERS
 // ============================================================
-function updateSmileBar(score, smiling = 0) {
+function updateSmileBar(score, smiling = 0, faces = 0) {
   smileFill.style.width = `${Math.round(score * 100)}%`;
-  const suf = smiling > 1 ? ` / ${smiling}人` : '';
+  const suf = faces > 1 ? ` / ${smiling}人` : '';
   smileScoreTxt.textContent = `${Math.round(score * 100)}%${suf}`;
   smileScoreTxt.style.color =
     score >= CONFIG.SMILE_THRESHOLD        ? 'var(--accent)' :

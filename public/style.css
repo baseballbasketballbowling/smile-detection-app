@@ -58,6 +58,15 @@ h1 {
   white-space: nowrap;
 }
 
+.version-tag {
+  font-size: .6rem;
+  font-weight: 500;
+  color: var(--text-dim);
+  letter-spacing: .04em;
+  vertical-align: middle;
+  margin-left: 2px;
+}
+
 .badge {
   font-size: .7rem;
   font-weight: 700;
