@@ -159,6 +159,8 @@ async function analyzeBatch(batch) {
     ].join('\n'),
   });
 
+  let errorOccurred = false;
+
   try {
     const res = await fetch('/api/analyze', {
       method:  'POST',
@@ -171,11 +173,14 @@ async function analyzeBatch(batch) {
       throw new Error(err.error || `HTTP ${res.status}`);
     }
 
-    const data   = await res.json();
-    const raw    = data.content?.[0]?.text?.trim() ?? '{}';
-    const clean  = raw.replace(/```(?:json)?\n?|\n?```/g, '').trim();
-    const parsed = JSON.parse(clean);
+    const data = await res.json();
+    const raw  = data.content?.[0]?.text?.trim() ?? '';
 
+    // Haikuが前後にテキストを足してもJSONブロックだけ抽出する
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error(`想定外のレスポンス: ${raw.slice(0, 80)}`);
+
+    const parsed  = JSON.parse(jsonMatch[0]);
     const scores  = Array.isArray(parsed.scores)
       ? parsed.scores.map(s => Math.min(1, Math.max(0, parseFloat(s) || 0)))
       : [];
@@ -186,6 +191,8 @@ async function analyzeBatch(batch) {
     onBatchResult(scores, smiling, batch);
 
   } catch (e) {
+    errorOccurred = true;
+    console.error('[analyzeBatch]', e.message);   // DevToolsで確認できる
     if (isRunning) setStatus(`エラー: ${e.message}`, 'error');
   } finally {
     batchPending = false;
@@ -193,7 +200,8 @@ async function analyzeBatch(batch) {
     if (isRunning && !isInCooldown && frameBuffer.length >= CONFIG.BATCH_SIZE) {
       const next = frameBuffer.splice(0, CONFIG.BATCH_SIZE);
       analyzeBatch(next);
-    } else if (isRunning && !isInCooldown) {
+    } else if (isRunning && !isInCooldown && !errorOccurred) {
+      // エラー時はメッセージを上書きせず残す
       setStatus('笑顔を検出中...');
     }
   }
