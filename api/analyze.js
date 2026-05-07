@@ -36,7 +36,14 @@ module.exports = async function handler(req, res) {
     });
 
     const data = await upstream.json();
-    return res.status(upstream.status).json(data);
+
+    if (!upstream.ok) {
+      // Anthropic error: { "error": { "type": "...", "message": "..." } }
+      const msg = data?.error?.message || JSON.stringify(data?.error) || `Anthropic error ${upstream.status}`;
+      return res.status(upstream.status).json({ error: msg });
+    }
+
+    return res.status(200).json(data);
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
