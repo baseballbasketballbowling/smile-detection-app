@@ -261,23 +261,38 @@ async function analyzeBatch(batch) {
 function onBatchResult(scores, smilingCounts, faceCounts, kanpaiFlags, batch) {
   if (!isRunning || scores.length === 0) return;
 
-  // ── 既存のスマイル判定（変更なし）──────────────────────────
-  let bestScore = 0, bestIndex = 0, bestSmiling = 0, bestFaces = 0;
-  scores.forEach((s, i) => {
-    if (s > bestScore) {
-      bestScore   = s;
-      bestIndex   = i;
-      bestSmiling = smilingCounts[i] ?? 0;
-      bestFaces   = faceCounts[i] ?? 0;
-    }
-  });
+  // ── スマイル判定 ──────────────────────────────────────────
+// まず全フレームの最高スコアを求める（メーター表示用）
+let bestScore = 0, bestIndex = 0, bestSmiling = 0, bestFaces = 0;
+scores.forEach((s, i) => {
+if (s > bestScore) {
+bestScore = s;
+bestIndex = i;
+bestSmiling = smilingCounts[i] ?? 0;
+bestFaces = faceCounts[i] ?? 0;
+}
+});
 
-  updateSmileBar(bestScore, bestSmiling, bestFaces);
+updateSmileBar(bestScore, bestSmiling, bestFaces);
 
-  if (!isInCooldown && bestScore >= CONFIG.SMILE_THRESHOLD) {
-    triggerShutter(batch[bestIndex].fullDataUrl, bestScore, Math.max(1, bestSmiling), bestFaces);
-  }
-  // ────────────────────────────────────────────────────────────
+if (!isInCooldown && bestScore >= CONFIG.SMILE_THRESHOLD) {
+// 閾値以上のフレームから「顔検出数→笑顔数→スコア」の優先順で最適フレームを選ぶ
+// 顔が画角外・暗い・傾いている誤検知フレームを避けるため
+let photoIndex = bestIndex, photoScore = bestScore;
+let photoSmiling = bestSmiling, photoFaces = bestFaces;
+scores.forEach((s, i) => {
+if (s < CONFIG.SMILE_THRESHOLD) return;
+const fc = faceCounts[i] ?? 0;
+const sc = smilingCounts[i] ?? 0;
+const better =
+fc > photoFaces ||
+(fc === photoFaces && sc > photoSmiling) ||
+(fc === photoFaces && sc === photoSmiling && s > photoScore);
+if (better) { photoIndex = i; photoScore = s; photoSmiling = sc; photoFaces = fc; }
+});
+triggerShutter(batch[photoIndex].fullDataUrl, photoScore, Math.max(1, photoSmiling), photoFaces);
+}
+// ─────────────────────────────────────────────────────────
 
   // 乾杯検知（既存処理とは独立。エラーが出ても既存処理に影響しない）
   try {
@@ -342,9 +357,11 @@ function updateBestShot() {
   if (shotHistory.length === 0) { bestShotSection.style.display = 'none'; return; }
   bestShotSection.style.display = '';
 
-  const best = [...shotHistory].sort((a, b) =>
-    b.smiling !== a.smiling ? b.smiling - a.smiling : b.score - a.score
-  )[0];
+  const best = [...shotHistory].sort((a, b) => {
+if (b.smiling !== a.smiling) return b.smiling - a.smiling;
+if ((b.faces ?? 0) !== (a.faces ?? 0)) return (b.faces ?? 0) - (a.faces ?? 0);
+return b.score - a.score;
+})[0];
 
   bestShotCard.innerHTML = '';
   const img   = Object.assign(document.createElement('img'), { src: best.dataUrl, alt: 'ベストショット' });
