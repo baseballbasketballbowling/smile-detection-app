@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 // CONFIG
 // ============================================================
 const CONFIG = {
@@ -312,7 +312,7 @@ function triggerShutter(dataUrl, score, smiling = 1, faces = 0, reason = 'smile'
   shotHistory.unshift({ dataUrl, score, smiling, faces, ts: Date.now() });
   if (shotHistory.length > 10) shotHistory.pop();
   updateBestShot();
-  downloadBtn.disabled = false;
+  if (downloadBtn) downloadBtn.disabled = false;
 
   setBadge('cooldown');
   const cooldownSec  = `${(CONFIG.COOLDOWN_MS / 1000).toFixed(1)}秒後に再開`;
@@ -470,7 +470,7 @@ clearBtn.addEventListener('click', () => {
   shotHistory = [];
   bestShotSection.style.display = 'none';
   bestShotCard.innerHTML = '';
-  downloadBtn.disabled = true;
+  if (downloadBtn) downloadBtn.disabled = true;
 });
 
 thresholdRange.addEventListener('input', () => {
@@ -493,7 +493,7 @@ cooldownRange.addEventListener('input', () => {
   cooldownVal.textContent = `${(v / 1000).toFixed(1)}s`;
 });
 
-exposureRange.addEventListener('input', () => {
+if (exposureRange) exposureRange.addEventListener('input', () => {
   CONFIG.EXPOSURE = parseFloat(exposureRange.value);
   const sign = CONFIG.EXPOSURE > 0 ? '+' : '';
   exposureVal.textContent = `${sign}${CONFIG.EXPOSURE.toFixed(1)}`;
@@ -506,11 +506,11 @@ exposureRange.addEventListener('input', () => {
 // ============================================================
 // DOWNLOAD SESSION
 // ============================================================
-downloadBtn.addEventListener('click', async () => {
+if (downloadBtn) downloadBtn.addEventListener('click', async () => {
   if (shotHistory.length === 0) return;
 
   const origText     = downloadBtn.textContent;
-  downloadBtn.disabled = true;
+  if (downloadBtn) downloadBtn.disabled = true;
   downloadBtn.textContent = '⏳ 準備中';
 
   const now     = new Date();
