@@ -3,7 +3,7 @@
 // ============================================================
 const CONFIG = {
   BATCH_SIZE:        6,
-  CAPTURE_INTERVAL:  500,
+  CAPTURE_INTERVAL:  250,
   SMILE_THRESHOLD:   0.72,
   COOLDOWN_MS:       3000,
   API_W:             320,
