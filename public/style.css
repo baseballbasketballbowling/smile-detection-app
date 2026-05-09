@@ -1,4 +1,4 @@
-/* ============================================================
+﻿/* ============================================================
    Reset & Variables
    ============================================================ */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -399,6 +399,17 @@ h1 {
   flex-shrink: 0;
 }
 .gallery-header h2 { font-size: .9rem; font-weight: 600; color: var(--text-dim); }
+.gallery-header-btns { display: flex; gap: 6px; align-items: center; }
+
+.btn-download:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.btn-download:hover:not(:disabled) {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border-color: var(--accent);
+}
 
 #gallery-grid {
   flex: 1;
@@ -429,6 +440,8 @@ h1 {
   aspect-ratio: 4/3;
   object-fit: cover;
   display: block;
+  aspect-ratio: 3 / 4;
+  object-fit: cover;
 }
 .gallery-item-info {
   position: absolute;
@@ -519,7 +532,7 @@ h1 {
 
   .control-group {
     display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
+    grid-template-columns: 1fr 1fr;
     gap: 6px;
     width: 100%;
     flex: none;

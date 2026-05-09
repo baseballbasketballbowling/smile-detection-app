@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // CONFIG
 // ============================================================
 const CONFIG = {
@@ -10,6 +10,7 @@ const CONFIG = {
   API_H:             240,
   API_QUALITY:       0.75,
   PHOTO_QUALITY:     0.95,
+  EXPOSURE:          0,     // EV: -2.0 〜 +2.0
 };
 
 // ============================================================
@@ -57,6 +58,9 @@ const intervalRange   = $('interval-range');
 const intervalVal     = $('interval-val');
 const cooldownRange   = $('cooldown-range');
 const cooldownVal     = $('cooldown-val');
+const exposureRange   = $('exposure-range');
+const exposureVal     = $('exposure-val');
+const downloadBtn     = $('download-btn');
 
 const capCanvas = $('capture-canvas');
 const capCtx    = capCanvas.getContext('2d');
@@ -142,12 +146,19 @@ async function switchCamera() {
 function captureFrame() {
   if (!isRunning || isInCooldown) return;
 
-  const frameId = frameIdCounter++;
+  const frameId  = frameIdCounter++;
+  const bFilter  = CONFIG.EXPOSURE !== 0
+    ? `brightness(${Math.round(Math.pow(2, CONFIG.EXPOSURE) * 100)}%)`
+    : 'none';
 
+  capCtx.filter = bFilter;
   capCtx.drawImage(video, 0, 0, capCanvas.width, capCanvas.height);
+  capCtx.filter = 'none';
   const fullDataUrl = capCanvas.toDataURL('image/jpeg', CONFIG.PHOTO_QUALITY);
 
+  apiCtx.filter = bFilter;
   apiCtx.drawImage(video, 0, 0, apiCanvas.width, apiCanvas.height);
+  apiCtx.filter = 'none';
   const apiBase64 = apiCanvas.toDataURL('image/jpeg', CONFIG.API_QUALITY).split(',')[1];
 
   frameBuffer.push({ id: frameId, fullDataUrl, apiBase64, ts: Date.now() });
@@ -156,7 +167,8 @@ function captureFrame() {
   updateFrameCounter();
 
   if (!batchPending && frameBuffer.length >= CONFIG.BATCH_SIZE) {
-    const batch = frameBuffer.splice(0, CONFIG.BATCH_SIZE);
+    const batch = frameBuffer.slice(0, CONFIG.BATCH_SIZE);
+    frameBuffer.splice(0, Math.ceil(CONFIG.BATCH_SIZE / 2));
     analyzeBatch(batch);
   }
 }
@@ -183,8 +195,9 @@ async function analyzeBatch(batch) {
       `  (1) "scores": highest smile score among all faces (0.0=no smile, 1.0=big genuine smile, no faces=0.0)`,
       `  (2) "faces": total number of faces detected (0 if none)`,
       `  (3) "smiling": count of people clearly smiling (smile score > 0.5)`,
+      `  (4) "kanpai": true if people appear to be raising glasses or cups for a toast, false otherwise`,
       `Reply ONLY with valid JSON — no markdown, no explanation:`,
-      `{"scores":[${Array(batch.length).fill('0.0').join(',')}],"faces":[${Array(batch.length).fill('0').join(',')}],"smiling":[${Array(batch.length).fill('0').join(',')}]}`,
+      `{"scores":[${Array(batch.length).fill('0.0').join(',')}],"faces":[${Array(batch.length).fill('0').join(',')}],"smiling":[${Array(batch.length).fill('0').join(',')}],"kanpai":[${Array(batch.length).fill('false').join(',')}]}`,
     ].join('\n'),
   });
 
@@ -219,8 +232,11 @@ async function analyzeBatch(batch) {
     const smiling = Array.isArray(parsed.smiling)
       ? parsed.smiling.map(n => Math.max(0, parseInt(n) || 0))
       : scores.map(() => 0);
+    const kanpai  = Array.isArray(parsed.kanpai)
+      ? parsed.kanpai.map(k => k === true || k === 'true')
+      : scores.map(() => false);
 
-    onBatchResult(scores, smiling, faces, batch);
+    onBatchResult(scores, smiling, faces, kanpai, batch);
 
   } catch (e) {
     errorOccurred = true;
@@ -242,9 +258,10 @@ async function analyzeBatch(batch) {
 // ============================================================
 // BATCH RESULT
 // ============================================================
-function onBatchResult(scores, smilingCounts, faceCounts, batch) {
+function onBatchResult(scores, smilingCounts, faceCounts, kanpaiFlags, batch) {
   if (!isRunning || scores.length === 0) return;
 
+  // ── 既存のスマイル判定（変更なし）──────────────────────────
   let bestScore = 0, bestIndex = 0, bestSmiling = 0, bestFaces = 0;
   scores.forEach((s, i) => {
     if (s > bestScore) {
@@ -260,12 +277,28 @@ function onBatchResult(scores, smilingCounts, faceCounts, batch) {
   if (!isInCooldown && bestScore >= CONFIG.SMILE_THRESHOLD) {
     triggerShutter(batch[bestIndex].fullDataUrl, bestScore, Math.max(1, bestSmiling), bestFaces);
   }
+  // ────────────────────────────────────────────────────────────
+
+  // 乾杯検知（既存処理とは独立。エラーが出ても既存処理に影響しない）
+  try {
+    const kanpaiIdx = Array.isArray(kanpaiFlags)
+      ? kanpaiFlags.findIndex(k => k === true)
+      : -1;
+    if (!isInCooldown && kanpaiIdx >= 0) {
+      const kScore   = scores[kanpaiIdx]        ?? bestScore;
+      const kSmiling = smilingCounts[kanpaiIdx] ?? bestSmiling;
+      const kFaces   = faceCounts[kanpaiIdx]    ?? bestFaces;
+      triggerShutter(batch[kanpaiIdx].fullDataUrl, kScore, Math.max(1, kSmiling), kFaces, 'kanpai');
+    }
+  } catch (e) {
+    console.warn('[kanpai]', e.message);
+  }
 }
 
 // ============================================================
 // SHUTTER
 // ============================================================
-function triggerShutter(dataUrl, score, smiling = 1, faces = 0) {
+function triggerShutter(dataUrl, score, smiling = 1, faces = 0, reason = 'smile') {
   if (isInCooldown) return;
   isInCooldown = true;
   frameBuffer  = [];
@@ -279,10 +312,15 @@ function triggerShutter(dataUrl, score, smiling = 1, faces = 0) {
   shotHistory.unshift({ dataUrl, score, smiling, faces, ts: Date.now() });
   if (shotHistory.length > 10) shotHistory.pop();
   updateBestShot();
+  downloadBtn.disabled = false;
 
   setBadge('cooldown');
+  const cooldownSec  = `${(CONFIG.COOLDOWN_MS / 1000).toFixed(1)}秒後に再開`;
   const smilingLabel = faces > 1 ? ` / ${smiling}人笑顔` : '';
-  setStatus(`撮影完了！ ${Math.round(score * 100)}%${smilingLabel}  — ${(CONFIG.COOLDOWN_MS / 1000).toFixed(1)}秒後に再開`);
+  const statusMsg    = reason === 'kanpai'
+    ? `🥂 乾杯を検知しました！  — ${cooldownSec}`
+    : `撮影完了！ ${Math.round(score * 100)}%${smilingLabel}  — ${cooldownSec}`;
+  setStatus(statusMsg);
 
   setTimeout(() => {
     if (!isRunning) return;
@@ -398,6 +436,7 @@ async function startDetection() {
 function stopDetection() {
   isRunning = false;
   clearInterval(captureTimer); captureTimer = null;
+  video.style.filter = '';
   stopCamera();
   startBtn.style.display        = '';
   startBtn.disabled             = false;
@@ -431,6 +470,7 @@ clearBtn.addEventListener('click', () => {
   shotHistory = [];
   bestShotSection.style.display = 'none';
   bestShotCard.innerHTML = '';
+  downloadBtn.disabled = true;
 });
 
 thresholdRange.addEventListener('input', () => {
@@ -451,6 +491,75 @@ cooldownRange.addEventListener('input', () => {
   const v = parseInt(cooldownRange.value);
   CONFIG.COOLDOWN_MS = v;
   cooldownVal.textContent = `${(v / 1000).toFixed(1)}s`;
+});
+
+exposureRange.addEventListener('input', () => {
+  CONFIG.EXPOSURE = parseFloat(exposureRange.value);
+  const sign = CONFIG.EXPOSURE > 0 ? '+' : '';
+  exposureVal.textContent = `${sign}${CONFIG.EXPOSURE.toFixed(1)}`;
+  // CSS filter: video preview
+  video.style.filter = CONFIG.EXPOSURE !== 0
+    ? `brightness(${Math.round(Math.pow(2, CONFIG.EXPOSURE) * 100)}%)`
+    : '';
+});
+
+// ============================================================
+// DOWNLOAD SESSION
+// ============================================================
+downloadBtn.addEventListener('click', async () => {
+  if (shotHistory.length === 0) return;
+
+  const origText     = downloadBtn.textContent;
+  downloadBtn.disabled = true;
+  downloadBtn.textContent = '⏳ 準備中';
+
+  const now     = new Date();
+  const summary = {
+    exportedAt: now.toISOString(),
+    totalShots: shotHistory.length,
+    bestScore:  parseFloat(Math.max(...shotHistory.map(s => s.score)).toFixed(3)),
+    avgScore:   parseFloat(
+      (shotHistory.reduce((a, s) => a + s.score, 0) / shotHistory.length).toFixed(3)
+    ),
+    shots: shotHistory.map((s, i) => ({
+      index:     i + 1,
+      timestamp: new Date(s.ts).toISOString(),
+      score:     parseFloat(s.score.toFixed(3)),
+      smiling:   s.smiling,
+      faces:     s.faces ?? 0,
+    })),
+  };
+
+  try {
+    if (typeof JSZip !== 'undefined') {
+      const zip = new JSZip();
+      zip.file('summary.json', JSON.stringify(summary, null, 2));
+      shotHistory.forEach((shot, i) => {
+        const b64  = shot.dataUrl.split(',')[1];
+        const name = `shot_${String(i + 1).padStart(2, '0')}_${Math.round(shot.score * 100)}pct.jpg`;
+        zip.file(name, b64, { base64: true });
+      });
+      const blob = await zip.generateAsync({ type: 'blob' });
+      const url  = URL.createObjectURL(blob);
+      Object.assign(document.createElement('a'), {
+        href:     url,
+        download: `smile-session-${Date.now()}.zip`,
+      }).click();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } else {
+      // Fallback: JSON summary only (JSZip not loaded)
+      const blob = new Blob([JSON.stringify(summary, null, 2)], { type: 'application/json' });
+      const url  = URL.createObjectURL(blob);
+      Object.assign(document.createElement('a'), {
+        href:     url,
+        download: `smile-summary-${Date.now()}.json`,
+      }).click();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    }
+  } finally {
+    downloadBtn.disabled    = false;
+    downloadBtn.textContent = origText;
+  }
 });
 
 updateThresholdMarker();
