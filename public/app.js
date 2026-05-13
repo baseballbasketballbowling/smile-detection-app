@@ -196,8 +196,9 @@ async function analyzeBatch(batch) {
       `  (2) "faces": total number of faces detected (0 if none)`,
       `  (3) "smiling": count of people clearly smiling (smile score > 0.5)`,
       `  (4) "kanpai": true if people appear to be raising glasses or cups for a toast, false otherwise`,
+`  (5) "obstructed": true if a hand, arm, or object is directly blocking/covering faces or the camera lens in this frame, false otherwise`,
       `Reply ONLY with valid JSON — no markdown, no explanation:`,
-      `{"scores":[${Array(batch.length).fill('0.0').join(',')}],"faces":[${Array(batch.length).fill('0').join(',')}],"smiling":[${Array(batch.length).fill('0').join(',')}],"kanpai":[${Array(batch.length).fill('false').join(',')}]}`,
+      `{"scores":[${Array(batch.length).fill('0.0').join(',')}],"faces":[${Array(batch.length).fill('0').join(',')}],"smiling":[${Array(batch.length).fill('0').join(',')}],"kanpai":[${Array(batch.length).fill('false').join(',')}],"obstructed":[${Array(batch.length).fill('false').join(',')}]}`,
     ].join('\n'),
   });
 
@@ -235,8 +236,11 @@ async function analyzeBatch(batch) {
     const kanpai  = Array.isArray(parsed.kanpai)
       ? parsed.kanpai.map(k => k === true || k === 'true')
       : scores.map(() => false);
+const obstructed = Array.isArray(parsed.obstructed)
+? parsed.obstructed.map(o => o === true || o === 'true')
+: scores.map(() => false);
 
-    onBatchResult(scores, smiling, faces, kanpai, batch);
+    onBatchResult(scores, smiling, faces, kanpai, obstructed, batch);
 
   } catch (e) {
     errorOccurred = true;
@@ -258,7 +262,7 @@ async function analyzeBatch(batch) {
 // ============================================================
 // BATCH RESULT
 // ============================================================
-function onBatchResult(scores, smilingCounts, faceCounts, kanpaiFlags, batch) {
+function onBatchResult(scores, smilingCounts, faceCounts, kanpaiFlags, obstructedFlags, batch) {
   if (!isRunning || scores.length === 0) return;
 
   // ── スマイル判定 ──────────────────────────────────────────
@@ -280,8 +284,12 @@ if (!isInCooldown && bestScore >= CONFIG.SMILE_THRESHOLD) {
 // 顔が画角外・暗い・傾いている誤検知フレームを避けるため
 let photoIndex = bestIndex, photoScore = bestScore;
 let photoSmiling = bestSmiling, photoFaces = bestFaces;
+// Check if any above-threshold frame is not obstructed
+const hasCleanFrame = scores.some((s, i) => s >= CONFIG.SMILE_THRESHOLD && !(obstructedFlags[i] ?? false));
 scores.forEach((s, i) => {
 if (s < CONFIG.SMILE_THRESHOLD) return;
+// Skip obstructed frames if a clean alternative exists
+if (hasCleanFrame && (obstructedFlags[i] ?? false)) return;
 const fc = faceCounts[i] ?? 0;
 const sc = smilingCounts[i] ?? 0;
 const better =
