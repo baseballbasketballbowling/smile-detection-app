@@ -230,7 +230,7 @@ async function analyzeBatch(batch) {
       ? parsed.faces.map(n => Math.max(0, parseInt(n) || 0))
       : scores.map(() => 0);
     const smiling = Array.isArray(parsed.smiling)
-      ? parsed.smiling.map(n => Math.max(0, parseInt(n) || 0))
+      ? parsed.smiling.map((n, i) => Math.min(Math.max(0, parseInt(n) || 0), faces[i] ?? 0))
       : scores.map(() => 0);
     const kanpai  = Array.isArray(parsed.kanpai)
       ? parsed.kanpai.map(k => k === true || k === 'true')
@@ -290,7 +290,7 @@ fc > photoFaces ||
 (fc === photoFaces && sc === photoSmiling && s > photoScore);
 if (better) { photoIndex = i; photoScore = s; photoSmiling = sc; photoFaces = fc; }
 });
-triggerShutter(batch[photoIndex].fullDataUrl, photoScore, Math.max(1, photoSmiling), photoFaces);
+triggerShutter(batch[photoIndex].fullDataUrl, photoScore, photoFaces > 0 ? Math.min(Math.max(1, photoSmiling), photoFaces) : Math.max(1, photoSmiling), photoFaces);
 }
 // ─────────────────────────────────────────────────────────
 
