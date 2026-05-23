@@ -67,6 +67,7 @@ const cooldownVal     = $('cooldown-val');
 const exposureRange   = $('exposure-range');
 const exposureVal     = $('exposure-val');
 const downloadBtn     = $('download-btn');
+const sendEmailBtn    = $('send-email-btn');
 
 const capCanvas = $('capture-canvas');
 const capCtx    = capCanvas.getContext('2d');
@@ -202,7 +203,7 @@ async function analyzeBatch(batch) {
       `  (2) "faces": total number of faces detected (0 if none)`,
       `  (3) "smiling": count of people clearly smiling (smile score > 0.5)`,
       `  (4) "kanpai": true if people appear to be raising glasses or cups for a toast, false otherwise`,
-`  (5) "obstructed": true if a hand, arm, or object is directly blocking/covering faces or the camera lens in this frame, false otherwise`,
+      `  (5) "obstructed": true if a hand, arm, or object is directly blocking/covering faces or the camera lens in this frame, false otherwise`,
       `Reply ONLY with valid JSON — no markdown, no explanation:`,
       `{"scores":[${Array(batch.length).fill('0.0').join(',')}],"faces":[${Array(batch.length).fill('0').join(',')}],"smiling":[${Array(batch.length).fill('0').join(',')}],"kanpai":[${Array(batch.length).fill('false').join(',')}],"obstructed":[${Array(batch.length).fill('false').join(',')}]}`,
     ].join('\n'),
@@ -225,7 +226,6 @@ async function analyzeBatch(batch) {
     const data = await res.json();
     const raw  = data.content?.[0]?.text?.trim() ?? '';
 
-    // Haikuが前後にテキストを足してもJSONブロックだけ抽出する
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error(`想定外のレスポンス: ${raw.slice(0, 80)}`);
 
@@ -242,15 +242,15 @@ async function analyzeBatch(batch) {
     const kanpai  = Array.isArray(parsed.kanpai)
       ? parsed.kanpai.map(k => k === true || k === 'true')
       : scores.map(() => false);
-const obstructed = Array.isArray(parsed.obstructed)
-? parsed.obstructed.map(o => o === true || o === 'true')
-: scores.map(() => false);
+    const obstructed = Array.isArray(parsed.obstructed)
+      ? parsed.obstructed.map(o => o === true || o === 'true')
+      : scores.map(() => false);
 
     onBatchResult(scores, smiling, faces, kanpai, obstructed, batch);
 
   } catch (e) {
     errorOccurred = true;
-    console.error('[analyzeBatch]', e.message);   // DevToolsで確認できる
+    console.error('[analyzeBatch]', e.message);
     if (isRunning) setStatus(`エラー: ${e.message}`, 'error');
   } finally {
     batchPending = false;
@@ -259,7 +259,6 @@ const obstructed = Array.isArray(parsed.obstructed)
       const next = frameBuffer.splice(0, CONFIG.BATCH_SIZE);
       analyzeBatch(next);
     } else if (isRunning && !isInCooldown && !errorOccurred) {
-      // エラー時はメッセージを上書きせず残す
       setStatus('笑顔を検出中...');
     }
   }
@@ -293,7 +292,7 @@ function onBatchResult(scores, smilingCounts, faceCounts, kanpaiFlags, obstructe
 
   if (!isInCooldown) tryPeakShutter();
 
-  // 乾杯検知（既存処理とは独立。エラーが出ても既存処理に影響しない）
+  // 乾杯検知
   try {
     const kanpaiIdx = Array.isArray(kanpaiFlags)
       ? kanpaiFlags.findIndex(k => k === true)
@@ -311,29 +310,34 @@ function onBatchResult(scores, smilingCounts, faceCounts, kanpaiFlags, obstructe
 
 // ============================================================
 // PEAK DETECTION
-// scoreHistory を時系列で見て、スコアが下がり始めた瞬間に
-// ピーク時点のフレームでシャッターを切る。
+// 複合スコア = score + min(smiling人数, 5) × 0.1
+// 複数人が揃って笑うフレームを1人の高スコアより優先する。
 // ============================================================
+function peakMetric(entry) {
+  return entry.score + Math.min(entry.smiling, 5) * 0.1;
+}
+
 function tryPeakShutter() {
   const h = scoreHistory;
   if (h.length < PEAK_CONFIRM + 2) return;
 
-  // 末尾 PEAK_CONFIRM フレームを除いた範囲でピーク候補を探す
+  // 末尾 PEAK_CONFIRM フレームを除いた範囲で複合スコア最大のフレームを探す
   const searchEnd = h.length - PEAK_CONFIRM;
-  let peakIdx = 0, peakScore = 0;
+  let peakIdx = 0, peakVal = 0;
   for (let i = 0; i < searchEnd; i++) {
-    if (h[i].score > peakScore) { peakScore = h[i].score; peakIdx = i; }
+    const m = peakMetric(h[i]);
+    if (m > peakVal) { peakVal = m; peakIdx = i; }
   }
 
-  if (peakScore < CONFIG.SMILE_THRESHOLD) return;
+  if (peakVal < CONFIG.SMILE_THRESHOLD) return;
 
-  // ピーク以降の全フレームが (peakScore - PEAK_DROP) を下回っているか確認
+  // ピーク以降の全フレームの複合スコアが (peakVal - PEAK_DROP) を下回っているか確認
   for (let i = peakIdx + 1; i < h.length; i++) {
-    if (h[i].score >= peakScore - PEAK_DROP) return; // まだ下降確定せず
+    if (peakMetric(h[i]) >= peakVal - PEAK_DROP) return;
   }
 
   // ピーク確定 → ピーク時点のフレームでシャッター
-  const peak = h[peakIdx];
+  const peak    = h[peakIdx];
   const smiling = peak.smiling > 0 ? peak.smiling : 1;
   triggerShutter(peak.dataUrl, peak.score, smiling, peak.faces);
   scoreHistory = [];
@@ -357,7 +361,8 @@ function triggerShutter(dataUrl, score, smiling = 1, faces = 0, reason = 'smile'
   shotHistory.unshift({ dataUrl, score, smiling, faces, ts: Date.now() });
   if (shotHistory.length > 10) shotHistory.pop();
   updateBestShot();
-  if (downloadBtn) downloadBtn.disabled = false;
+  if (downloadBtn)  downloadBtn.disabled  = false;
+  if (sendEmailBtn) sendEmailBtn.disabled = false;
 
   setBadge('cooldown');
   const cooldownSec  = `${(CONFIG.COOLDOWN_MS / 1000).toFixed(1)}秒後に再開`;
@@ -389,10 +394,10 @@ function updateBestShot() {
   bestShotSection.style.display = '';
 
   const best = [...shotHistory].sort((a, b) => {
-if (b.smiling !== a.smiling) return b.smiling - a.smiling;
-if ((b.faces ?? 0) !== (a.faces ?? 0)) return (b.faces ?? 0) - (a.faces ?? 0);
-return b.score - a.score;
-})[0];
+    if (b.smiling !== a.smiling) return b.smiling - a.smiling;
+    if ((b.faces ?? 0) !== (a.faces ?? 0)) return (b.faces ?? 0) - (a.faces ?? 0);
+    return b.score - a.score;
+  })[0];
 
   bestShotCard.innerHTML = '';
   const img   = Object.assign(document.createElement('img'), { src: best.dataUrl, alt: 'ベストショット' });
@@ -500,6 +505,67 @@ function stopDetection() {
 }
 
 // ============================================================
+// EMAIL
+// ============================================================
+function resizeForEmail(dataUrl, maxWidth = 800) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      const scale  = Math.min(1, maxWidth / img.width);
+      const canvas = document.createElement('canvas');
+      canvas.width  = Math.round(img.width  * scale);
+      canvas.height = Math.round(img.height * scale);
+      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL('image/jpeg', 0.82));
+    };
+    img.src = dataUrl;
+  });
+}
+
+async function sendEmail() {
+  if (shotHistory.length === 0 || !sendEmailBtn) return;
+  const origText = sendEmailBtn.textContent;
+  sendEmailBtn.disabled = true;
+  sendEmailBtn.textContent = '⏳ 送信中...';
+
+  try {
+    const shots = await Promise.all(
+      shotHistory.map(async s => ({
+        dataUrl: await resizeForEmail(s.dataUrl),
+        score:   s.score,
+        smiling: s.smiling,
+        faces:   s.faces ?? 0,
+      }))
+    );
+
+    const res = await fetch('/api/send-email', {
+      method:  'POST',
+      headers: { 'content-type': 'application/json' },
+      body:    JSON.stringify({ shots }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `HTTP ${res.status}`);
+    }
+
+    sendEmailBtn.textContent = '✓ 送信済み';
+    setTimeout(() => {
+      sendEmailBtn.textContent = origText;
+      sendEmailBtn.disabled = shotHistory.length === 0;
+    }, 3000);
+  } catch (e) {
+    console.error('[sendEmail]', e.message);
+    sendEmailBtn.textContent = '✗ 送信失敗';
+    setStatus(`メール送信エラー: ${e.message}`, 'error');
+    setTimeout(() => {
+      sendEmailBtn.textContent = origText;
+      sendEmailBtn.disabled = false;
+    }, 3000);
+  }
+}
+
+// ============================================================
 // EVENT LISTENERS
 // ============================================================
 startBtn.addEventListener('click', startDetection);
@@ -518,7 +584,8 @@ clearBtn.addEventListener('click', () => {
   shotHistory = [];
   bestShotSection.style.display = 'none';
   bestShotCard.innerHTML = '';
-  if (downloadBtn) downloadBtn.disabled = true;
+  if (downloadBtn)  downloadBtn.disabled  = true;
+  if (sendEmailBtn) sendEmailBtn.disabled = true;
 });
 
 thresholdRange.addEventListener('input', () => {
@@ -545,11 +612,12 @@ if (exposureRange) exposureRange.addEventListener('input', () => {
   CONFIG.EXPOSURE = parseFloat(exposureRange.value);
   const sign = CONFIG.EXPOSURE > 0 ? '+' : '';
   exposureVal.textContent = `${sign}${CONFIG.EXPOSURE.toFixed(1)}`;
-  // CSS filter: video preview
   video.style.filter = CONFIG.EXPOSURE !== 0
     ? `brightness(${Math.round(Math.pow(2, CONFIG.EXPOSURE) * 100)}%)`
     : '';
 });
+
+if (sendEmailBtn) sendEmailBtn.addEventListener('click', sendEmail);
 
 // ============================================================
 // DOWNLOAD SESSION
@@ -595,7 +663,6 @@ if (downloadBtn) downloadBtn.addEventListener('click', async () => {
       }).click();
       setTimeout(() => URL.revokeObjectURL(url), 10000);
     } else {
-      // Fallback: JSON summary only (JSZip not loaded)
       const blob = new Blob([JSON.stringify(summary, null, 2)], { type: 'application/json' });
       const url  = URL.createObjectURL(blob);
       Object.assign(document.createElement('a'), {
