@@ -13,6 +13,11 @@ const CONFIG = {
   EXPOSURE:          0,     // EV: -2.0 〜 +2.0
 };
 
+// Peak detection constants
+const PEAK_CONFIRM = 2;    // ピーク後に何フレーム下降すれば確定とするか
+const PEAK_DROP    = 0.08; // ピークからこの値以上下がれば下降とみなす
+const HISTORY_MAX  = 20;   // scoreHistory の最大保持フレーム数
+
 // ============================================================
 // STATE
 // ============================================================
@@ -23,6 +28,7 @@ let isInCooldown   = false;
 let batchPending   = false;
 let frameIdCounter = 0;
 let frameBuffer        = [];
+let scoreHistory       = []; // {score, smiling, faces, dataUrl} のリスト
 let shotHistory        = [];
 let deviceList         = [];
 let activeDeviceId     = null;
@@ -265,42 +271,27 @@ const obstructed = Array.isArray(parsed.obstructed)
 function onBatchResult(scores, smilingCounts, faceCounts, kanpaiFlags, obstructedFlags, batch) {
   if (!isRunning || scores.length === 0) return;
 
-  // ── スマイル判定 ──────────────────────────────────────────
-// まず全フレームの最高スコアを求める（メーター表示用）
-let bestScore = 0, bestIndex = 0, bestSmiling = 0, bestFaces = 0;
-scores.forEach((s, i) => {
-if (s > bestScore) {
-bestScore = s;
-bestIndex = i;
-bestSmiling = smilingCounts[i] ?? 0;
-bestFaces = faceCounts[i] ?? 0;
-}
-});
+  // 閉塞されていないフレームをスコア履歴に追記
+  scores.forEach((s, i) => {
+    if (!(obstructedFlags[i] ?? false)) {
+      scoreHistory.push({
+        score:   s,
+        smiling: smilingCounts[i] ?? 0,
+        faces:   faceCounts[i]    ?? 0,
+        dataUrl: batch[i].fullDataUrl,
+      });
+    }
+  });
+  if (scoreHistory.length > HISTORY_MAX) {
+    scoreHistory.splice(0, scoreHistory.length - HISTORY_MAX);
+  }
 
-updateSmileBar(bestScore, bestSmiling, bestFaces);
+  // メーター表示: 現バッチの最高スコア
+  let dispScore = 0, dispIdx = 0;
+  scores.forEach((s, i) => { if (s > dispScore) { dispScore = s; dispIdx = i; } });
+  updateSmileBar(dispScore, smilingCounts[dispIdx] ?? 0, faceCounts[dispIdx] ?? 0);
 
-if (!isInCooldown && bestScore >= CONFIG.SMILE_THRESHOLD) {
-// 閾値以上のフレームから「顔検出数→笑顔数→スコア」の優先順で最適フレームを選ぶ
-// 顔が画角外・暗い・傾いている誤検知フレームを避けるため
-let photoIndex = bestIndex, photoScore = bestScore;
-let photoSmiling = bestSmiling, photoFaces = bestFaces;
-// Check if any above-threshold frame is not obstructed
-const hasCleanFrame = scores.some((s, i) => s >= CONFIG.SMILE_THRESHOLD && !(obstructedFlags[i] ?? false));
-scores.forEach((s, i) => {
-if (s < CONFIG.SMILE_THRESHOLD) return;
-// Skip obstructed frames if a clean alternative exists
-if (hasCleanFrame && (obstructedFlags[i] ?? false)) return;
-const fc = faceCounts[i] ?? 0;
-const sc = smilingCounts[i] ?? 0;
-const better =
-fc > photoFaces ||
-(fc === photoFaces && sc > photoSmiling) ||
-(fc === photoFaces && sc === photoSmiling && s > photoScore);
-if (better) { photoIndex = i; photoScore = s; photoSmiling = sc; photoFaces = fc; }
-});
-triggerShutter(batch[photoIndex].fullDataUrl, photoScore, photoFaces > 0 ? Math.min(Math.max(1, photoSmiling), photoFaces) : Math.max(1, photoSmiling), photoFaces);
-}
-// ─────────────────────────────────────────────────────────
+  if (!isInCooldown) tryPeakShutter();
 
   // 乾杯検知（既存処理とは独立。エラーが出ても既存処理に影響しない）
   try {
@@ -308,14 +299,44 @@ triggerShutter(batch[photoIndex].fullDataUrl, photoScore, photoFaces > 0 ? Math.
       ? kanpaiFlags.findIndex(k => k === true)
       : -1;
     if (!isInCooldown && kanpaiIdx >= 0) {
-      const kScore   = scores[kanpaiIdx]        ?? bestScore;
-      const kSmiling = smilingCounts[kanpaiIdx] ?? bestSmiling;
-      const kFaces   = faceCounts[kanpaiIdx]    ?? bestFaces;
+      const kScore   = scores[kanpaiIdx]        ?? dispScore;
+      const kSmiling = smilingCounts[kanpaiIdx] ?? 0;
+      const kFaces   = faceCounts[kanpaiIdx]    ?? 0;
       triggerShutter(batch[kanpaiIdx].fullDataUrl, kScore, Math.max(1, kSmiling), kFaces, 'kanpai');
     }
   } catch (e) {
     console.warn('[kanpai]', e.message);
   }
+}
+
+// ============================================================
+// PEAK DETECTION
+// scoreHistory を時系列で見て、スコアが下がり始めた瞬間に
+// ピーク時点のフレームでシャッターを切る。
+// ============================================================
+function tryPeakShutter() {
+  const h = scoreHistory;
+  if (h.length < PEAK_CONFIRM + 2) return;
+
+  // 末尾 PEAK_CONFIRM フレームを除いた範囲でピーク候補を探す
+  const searchEnd = h.length - PEAK_CONFIRM;
+  let peakIdx = 0, peakScore = 0;
+  for (let i = 0; i < searchEnd; i++) {
+    if (h[i].score > peakScore) { peakScore = h[i].score; peakIdx = i; }
+  }
+
+  if (peakScore < CONFIG.SMILE_THRESHOLD) return;
+
+  // ピーク以降の全フレームが (peakScore - PEAK_DROP) を下回っているか確認
+  for (let i = peakIdx + 1; i < h.length; i++) {
+    if (h[i].score >= peakScore - PEAK_DROP) return; // まだ下降確定せず
+  }
+
+  // ピーク確定 → ピーク時点のフレームでシャッター
+  const peak = h[peakIdx];
+  const smiling = peak.smiling > 0 ? peak.smiling : 1;
+  triggerShutter(peak.dataUrl, peak.score, smiling, peak.faces);
+  scoreHistory = [];
 }
 
 // ============================================================
@@ -325,6 +346,7 @@ function triggerShutter(dataUrl, score, smiling = 1, faces = 0, reason = 'smile'
   if (isInCooldown) return;
   isInCooldown = true;
   frameBuffer  = [];
+  scoreHistory = [];
 
   triggerFlash();
   cameraWrapper.classList.add('pulse');
@@ -348,6 +370,7 @@ function triggerShutter(dataUrl, score, smiling = 1, faces = 0, reason = 'smile'
   setTimeout(() => {
     if (!isRunning) return;
     isInCooldown = false;
+    scoreHistory = [];
     setBadge('running');
     setStatus('笑顔を検出中...');
   }, CONFIG.COOLDOWN_MS);
@@ -447,7 +470,7 @@ async function startDetection() {
     return;
   }
   isRunning = true; isInCooldown = false; batchPending = false;
-  frameIdCounter = 0; frameBuffer = [];
+  frameIdCounter = 0; frameBuffer = []; scoreHistory = [];
   startBtn.style.display        = 'none';
   stopBtn.style.display         = '';
   manualBtn.disabled            = false;
@@ -468,7 +491,7 @@ function stopDetection() {
   stopBtn.style.display         = 'none';
   manualBtn.disabled            = true;
   cameraSwitchBtn.style.display = 'none';
-  frameBuffer = []; batchPending = false;
+  frameBuffer = []; batchPending = false; scoreHistory = [];
   setBadge('idle');
   setStatus('停止しました');
   updateSmileBar(0);
