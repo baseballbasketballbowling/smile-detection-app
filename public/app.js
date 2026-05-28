@@ -310,8 +310,8 @@ function onBatchResult(scores, smilingCounts, faceCounts, kanpaiFlags, obstructe
 
 // ============================================================
 // PEAK DETECTION
-// 複合スコア = score + min(smiling人数, 5) × 0.1
-// 複数人が揃って笑うフレームを1人の高スコアより優先する。
+// 複合スコア = score + min(smiling人数, 5) × 0.1 でピーク選択。
+// シャッター作動の閾値判定は必ず生スコアで行う（複数人ボーナスによる誤作動を防ぐ）。
 // ============================================================
 function peakMetric(entry) {
   return entry.score + Math.min(entry.smiling, 5) * 0.1;
@@ -329,7 +329,8 @@ function tryPeakShutter() {
     if (m > peakVal) { peakVal = m; peakIdx = i; }
   }
 
-  if (peakVal < CONFIG.SMILE_THRESHOLD) return;
+  // シャッター作動の閾値判定は生スコアのみ（複合スコア不使用）
+  if (h[peakIdx].score < CONFIG.SMILE_THRESHOLD) return;
 
   // ピーク以降の全フレームの複合スコアが (peakVal - PEAK_DROP) を下回っているか確認
   for (let i = peakIdx + 1; i < h.length; i++) {
