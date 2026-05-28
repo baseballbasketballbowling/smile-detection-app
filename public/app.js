@@ -77,11 +77,14 @@ const apiCtx    = apiCanvas.getContext('2d');
 // ============================================================
 // ORIENTATION HELPERS
 // iOS Safari は getUserMedia の videoWidth/Height が端末回転しても
-// 変わらないため、screen.orientation.angle で判定して canvas 側で回転する。
+// 変わらないため、向きを判定して canvas 側で回転する。
+// window.orientation は物理的なデバイス回転を返す（ページがロックされていても）。
+// screen.orientation.angle はページ/スクリーンの向きを返すため iOS では
+// ポートレートロック中は常に 0 になる。window.orientation を優先する。
 // ============================================================
 function getOrientationAngle() {
-  if (typeof screen.orientation?.angle === 'number') return screen.orientation.angle;
   if (typeof window.orientation === 'number') return ((window.orientation % 360) + 360) % 360;
+  if (typeof screen.orientation?.angle === 'number') return screen.orientation.angle;
   return 0;
 }
 
