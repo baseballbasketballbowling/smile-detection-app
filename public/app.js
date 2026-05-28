@@ -74,7 +74,38 @@ const capCtx    = capCanvas.getContext('2d');
 const apiCanvas = $('api-canvas');
 const apiCtx    = apiCanvas.getContext('2d');
 
-// Canvas dimensions are set dynamically when camera starts (video.onloadedmetadata)
+// ============================================================
+// ORIENTATION HELPERS
+// iOS Safari は getUserMedia の videoWidth/Height が端末回転しても
+// 変わらないため、screen.orientation.angle で判定して canvas 側で回転する。
+// ============================================================
+function getOrientationAngle() {
+  if (typeof screen.orientation?.angle === 'number') return screen.orientation.angle;
+  if (typeof window.orientation === 'number') return ((window.orientation % 360) + 360) % 360;
+  return 0;
+}
+
+// canvas サイズを現在の向きに同期し、iOS回転が必要なら true を返す
+function syncCanvasDimensions() {
+  const vw    = video.videoWidth;
+  const vh    = video.videoHeight;
+  const angle = getOrientationAngle();
+  const rotated = (angle === 90 || angle === 270) && vw < vh;
+  const cw = rotated ? vh : vw;
+  const ch = rotated ? vw : vh;
+  if (capCanvas.width !== cw || capCanvas.height !== ch) {
+    capCanvas.width  = cw;
+    capCanvas.height = ch;
+  }
+  const scale = Math.min(CONFIG.API_W / cw, CONFIG.API_H / ch);
+  const aw = Math.round(cw * scale);
+  const ah = Math.round(ch * scale);
+  if (apiCanvas.width !== aw || apiCanvas.height !== ah) {
+    apiCanvas.width  = aw;
+    apiCanvas.height = ah;
+  }
+  return rotated;
+}
 
 // ============================================================
 // CAMERA
@@ -94,13 +125,7 @@ async function startCamera() {
 
   return new Promise(resolve => {
     video.onloadedmetadata = () => {
-      const vw = video.videoWidth;
-      const vh = video.videoHeight;
-      capCanvas.width  = vw;
-      capCanvas.height = vh;
-      const scale = Math.min(CONFIG.API_W / vw, CONFIG.API_H / vh);
-      apiCanvas.width  = Math.round(vw * scale);
-      apiCanvas.height = Math.round(vh * scale);
+      syncCanvasDimensions();
       resolve();
     };
   });
@@ -153,22 +178,42 @@ async function switchCamera() {
 function captureFrame() {
   if (!isRunning || isInCooldown) return;
 
-  const frameId  = frameIdCounter++;
-  const bFilter  = CONFIG.EXPOSURE !== 0
+  // 毎フレームで canvas サイズを同期（端末回転時にも対応）
+  const rotated = syncCanvasDimensions();
+  const vw      = video.videoWidth;
+  const vh      = video.videoHeight;
+  const angle   = rotated ? getOrientationAngle() : 0;
+  const rot     = angle === 270 ? Math.PI / 2 : -Math.PI / 2;
+
+  const bFilter = CONFIG.EXPOSURE !== 0
     ? `brightness(${Math.round(Math.pow(2, CONFIG.EXPOSURE) * 100)}%)`
     : 'none';
 
-  capCtx.filter = bFilter;
-  capCtx.drawImage(video, 0, 0, capCanvas.width, capCanvas.height);
-  capCtx.filter = 'none';
+  // iOS 回転時は canvas 中心で回転して追記、通常時はそのまま描画
+  function drawToCanvas(ctx, cw, ch) {
+    if (rotated) {
+      const s = cw / vh; // canvas 横幅 / 元ビデオ縦幅 = 尺度ファクター
+      ctx.save();
+      ctx.translate(cw / 2, ch / 2);
+      ctx.rotate(rot);
+      ctx.filter = bFilter;
+      ctx.drawImage(video, -(vw * s) / 2, -(vh * s) / 2, vw * s, vh * s);
+      ctx.filter = 'none';
+      ctx.restore();
+    } else {
+      ctx.filter = bFilter;
+      ctx.drawImage(video, 0, 0, cw, ch);
+      ctx.filter = 'none';
+    }
+  }
+
+  drawToCanvas(capCtx, capCanvas.width, capCanvas.height);
   const fullDataUrl = capCanvas.toDataURL('image/jpeg', CONFIG.PHOTO_QUALITY);
 
-  apiCtx.filter = bFilter;
-  apiCtx.drawImage(video, 0, 0, apiCanvas.width, apiCanvas.height);
-  apiCtx.filter = 'none';
+  drawToCanvas(apiCtx, apiCanvas.width, apiCanvas.height);
   const apiBase64 = apiCanvas.toDataURL('image/jpeg', CONFIG.API_QUALITY).split(',')[1];
 
-  frameBuffer.push({ id: frameId, fullDataUrl, apiBase64, ts: Date.now() });
+  frameBuffer.push({ id: frameIdCounter++, fullDataUrl, apiBase64, ts: Date.now() });
   if (frameBuffer.length > CONFIG.BATCH_SIZE * 2) frameBuffer.shift();
 
   updateFrameCounter();
@@ -321,7 +366,6 @@ function tryPeakShutter() {
   const h = scoreHistory;
   if (h.length < PEAK_CONFIRM + 2) return;
 
-  // 末尾 PEAK_CONFIRM フレームを除いた範囲で複合スコア最大のフレームを探す
   const searchEnd = h.length - PEAK_CONFIRM;
   let peakIdx = 0, peakVal = 0;
   for (let i = 0; i < searchEnd; i++) {
@@ -329,15 +373,12 @@ function tryPeakShutter() {
     if (m > peakVal) { peakVal = m; peakIdx = i; }
   }
 
-  // シャッター作動の閾値判定は生スコアのみ（複合スコア不使用）
   if (h[peakIdx].score < CONFIG.SMILE_THRESHOLD) return;
 
-  // ピーク以降の全フレームの複合スコアが (peakVal - PEAK_DROP) を下回っているか確認
   for (let i = peakIdx + 1; i < h.length; i++) {
     if (peakMetric(h[i]) >= peakVal - PEAK_DROP) return;
   }
 
-  // ピーク確定 → ピーク時点のフレームでシャッター
   const peak    = h[peakIdx];
   const smiling = peak.smiling > 0 ? peak.smiling : 1;
   triggerShutter(peak.dataUrl, peak.score, smiling, peak.faces);
