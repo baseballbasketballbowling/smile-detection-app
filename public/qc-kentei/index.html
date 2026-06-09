@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QC検定一級 学習アプリ</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ホーム画面 -->
+  <div id="home-screen" class="screen active">
+    <header class="app-header">
+      <div class="header-title">QC検定<span class="level-badge">一級</span></div>
+      <div class="header-sub">学習アプリ</div>
+    </header>
+
+    <div class="stats-bar">
+      <div class="stat-item">
+        <div class="stat-val" id="stat-answered">0</div>
+        <div class="stat-lbl">解答数</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-val" id="stat-correct">0</div>
+        <div class="stat-lbl">正解数</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-val" id="stat-rate">-</div>
+        <div class="stat-lbl">正答率</div>
+      </div>
+    </div>
+
+    <div class="section-label">カテゴリを選択</div>
+    <div class="cat-grid">
+      <button class="cat-card" data-category="doe">
+        <div class="cat-icon">📐</div>
+        <div class="cat-name">実験計画法</div>
+        <div class="cat-desc">直交表・分散分析・田口メソッド</div>
+        <div class="cat-count" id="count-doe"></div>
+      </button>
+      <button class="cat-card" data-category="multivariate">
+        <div class="cat-icon">📊</div>
+        <div class="cat-name">多変量解析</div>
+        <div class="cat-desc">回帰・主成分・判別・クラスター</div>
+        <div class="cat-count" id="count-multivariate"></div>
+      </button>
+      <button class="cat-card" data-category="statistics">
+        <div class="cat-icon">📈</div>
+        <div class="cat-name">統計的手法</div>
+        <div class="cat-desc">管理図・工程能力・検定・推定</div>
+        <div class="cat-count" id="count-statistics"></div>
+      </button>
+      <button class="cat-card cat-all" data-category="all">
+        <div class="cat-icon">🎯</div>
+        <div class="cat-name">総合演習</div>
+        <div class="cat-desc">全カテゴリからランダム出題</div>
+        <div class="cat-count" id="count-all"></div>
+      </button>
+    </div>
+  </div>
+
+  <!-- クイズ画面 -->
+  <div id="quiz-screen" class="screen">
+    <div class="quiz-topbar">
+      <button id="quit-btn" class="quit-btn">✕</button>
+      <div class="quiz-meta">
+        <span id="quiz-category-label" class="quiz-cat-label"></span>
+        <span id="quiz-counter" class="quiz-counter">1 / 10</span>
+      </div>
+      <div id="quiz-score" class="quiz-score">0点</div>
+    </div>
+    <div class="progress-track">
+      <div id="progress-fill" class="progress-fill"></div>
+    </div>
+
+    <div class="question-card">
+      <p id="question-text" class="question-text"></p>
+    </div>
+
+    <div id="choices-wrap" class="choices-wrap"></div>
+
+    <div id="feedback-wrap" class="feedback-wrap hidden">
+      <div id="feedback-header" class="feedback-header correct">
+        <span id="feedback-icon">✅</span>
+        <span id="feedback-label">正解！</span>
+      </div>
+      <div id="correct-hint" class="correct-hint hidden">
+        <span class="hint-label">正解：</span><span id="correct-text"></span>
+      </div>
+      <div id="explanation" class="explanation"></div>
+      <button id="next-btn" class="next-btn">次の問題へ →</button>
+    </div>
+  </div>
+
+  <!-- 結果画面 -->
+  <div id="result-screen" class="screen">
+    <div class="result-wrap">
+      <div id="result-emoji" class="result-emoji"></div>
+      <h2 id="result-title" class="result-title"></h2>
+      <div class="score-wrap">
+        <span id="score-num" class="score-num"></span>
+        <span id="score-denom" class="score-denom"></span>
+      </div>
+      <div id="result-msg" class="result-msg"></div>
+      <div id="review-section" class="review-section"></div>
+      <div class="result-actions">
+        <button id="retry-btn" class="btn-primary">再挑戦</button>
+        <button id="home-btn" class="btn-secondary">ホームへ</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+<script src="questions.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
