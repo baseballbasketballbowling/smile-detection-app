@@ -76,24 +76,25 @@ const apiCtx    = apiCanvas.getContext('2d');
 
 // ============================================================
 // ORIENTATION HELPERS
-// iOS Safari は videoWidth/Height が端末回転後も変わらないため canvas 側で補正。
-// 向き検出 API の信頼性が低いため、横をデフォルトとして
-// vw < vh のとき常に横出力に回転する。
-// 回転方向のみ window.orientation で判定（取得不可なら -PI/2 をデフォルト）。
+// iOS Safari は getUserMedia の videoWidth/Height が端末回転しても
+// 変わらないため、向きを判定して canvas 側で回転する。
+// window.orientation は物理的なデバイス回転を返す（ページがロックされていても）。
+// screen.orientation.angle は iOS ではポートレートロック中常に 0 になるため、
+// window.orientation を優先する。
 // ============================================================
 function getOrientationAngle() {
-  // window.orientation は物理デバイス回転を反映（ページロックに依存しない）
   if (typeof window.orientation === 'number') return ((window.orientation % 360) + 360) % 360;
   if (typeof screen.orientation?.angle === 'number') return screen.orientation.angle;
   return 0;
 }
 
-// canvas サイズを同期。vw < vh なら常に横出力に回転して true を返す。
+// canvas サイズを現在の向きに同期し、横持ち回転が必要なら true を返す。
+// 縦持ち（angle=0/180）のときは回転しない：縦写真のままが正しい。
 function syncCanvasDimensions() {
-  const vw = video.videoWidth;
-  const vh = video.videoHeight;
-  // 縦動画は常に横キャンバスに変換（横をデフォルト）
-  const rotated = vw > 0 && vh > 0 && vw < vh;
+  const vw    = video.videoWidth;
+  const vh    = video.videoHeight;
+  const angle = getOrientationAngle();
+  const rotated = (angle === 90 || angle === 270) && vw < vh;
   const cw = rotated ? vh : vw;
   const ch = rotated ? vw : vh;
   if (capCanvas.width !== cw || capCanvas.height !== ch) {
@@ -181,25 +182,21 @@ async function switchCamera() {
 function captureFrame() {
   if (!isRunning || isInCooldown) return;
 
+  // 毎フレームで canvas サイズを同期（端末回転時にも対応）
   const rotated = syncCanvasDimensions();
   const vw      = video.videoWidth;
   const vh      = video.videoHeight;
-
-  // 回転方向: window.orientation が取得できればそれを使用、不明なら -PI/2（左横）をデフォルト
-  let rot = -Math.PI / 2;
-  if (rotated) {
-    const angle = getOrientationAngle();
-    if (angle === 270) rot = Math.PI / 2;
-    // angle === 0 (取得不可) のときも -PI/2 のままで OK
-  }
+  const angle   = rotated ? getOrientationAngle() : 0;
+  const rot     = angle === 270 ? Math.PI / 2 : -Math.PI / 2;
 
   const bFilter = CONFIG.EXPOSURE !== 0
     ? `brightness(${Math.round(Math.pow(2, CONFIG.EXPOSURE) * 100)}%)`
     : 'none';
 
+  // 横持ち回転時は canvas 中心で回転して描画、通常時はそのまま描画
   function drawToCanvas(ctx, cw, ch) {
     if (rotated) {
-      const s = cw / vh;
+      const s = cw / vh; // canvas 横幅 / 元ビデオ縦幅 = 尺度ファクター
       ctx.save();
       ctx.translate(cw / 2, ch / 2);
       ctx.rotate(rot);
@@ -620,7 +617,7 @@ cameraSwitchBtn.addEventListener('click', switchCamera);
 
 manualBtn.addEventListener('click', () => {
   if (!isRunning || isInCooldown) return;
-  capCtx.drawImage(video, 0, 0, CONFIG.CAPTURE_W, CONFIG.CAPTURE_H);
+  capCtx.drawImage(video, 0, 0, capCanvas.width, capCanvas.height);
   triggerShutter(capCanvas.toDataURL('image/jpeg', 0.92), 1.0, 1);
 });
 
