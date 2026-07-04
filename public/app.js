@@ -76,11 +76,10 @@ const apiCtx    = apiCanvas.getContext('2d');
 
 // ============================================================
 // ORIENTATION HELPERS
-// iOS Safari は getUserMedia の videoWidth/Height が端末回転しても
-// 変わらないため、向きを判定して canvas 側で回転する。
-// window.orientation は物理的なデバイス回転を返す（ページがロックされていても）。
-// screen.orientation.angle は iOS ではポートレートロック中常に 0 になるため、
-// window.orientation を優先する。
+// 基本方針：端末回転を検知したらカメラを再起動し、向きに合った
+// ネイティブ解像度のストリームを取得する（画質劣化なし）。
+// それでもストリームが縦寸法のままの場合の保険として canvas 回転も残す。
+// window.orientation は物理回転を反映（iOSのポートレートロックに影響されない）。
 // ============================================================
 function getOrientationAngle() {
   if (typeof window.orientation === 'number') return ((window.orientation % 360) + 360) % 360;
@@ -100,6 +99,9 @@ function syncCanvasDimensions() {
   if (capCanvas.width !== cw || capCanvas.height !== ch) {
     capCanvas.width  = cw;
     capCanvas.height = ch;
+    // サイズ変更で context 設定がリセットされるため毎回再設定
+    capCtx.imageSmoothingEnabled = true;
+    capCtx.imageSmoothingQuality = 'high';
   }
   const scale = Math.min(CONFIG.API_W / cw, CONFIG.API_H / ch);
   const aw = Math.round(cw * scale);
@@ -107,6 +109,8 @@ function syncCanvasDimensions() {
   if (apiCanvas.width !== aw || apiCanvas.height !== ah) {
     apiCanvas.width  = aw;
     apiCanvas.height = ah;
+    apiCtx.imageSmoothingEnabled = true;
+    apiCtx.imageSmoothingQuality = 'high';
   }
   return rotated;
 }
@@ -175,6 +179,27 @@ async function switchCamera() {
     cameraSwitchBtn.disabled = false;
   }
 }
+
+// 端末回転を検知したらカメラを再起動。
+// 回転後に再取得すると iOS が向きに合ったネイティブ解像度のストリームを返すため、
+// canvas 回転による画質劣化や回転後の低解像度化を回避できる。
+let orientationRestartTimer = null;
+window.addEventListener('orientationchange', () => {
+  if (!isRunning) return;
+  clearTimeout(orientationRestartTimer);
+  orientationRestartTimer = setTimeout(async () => {
+    if (!isRunning) return;
+    setStatus('画面回転を検知 — カメラを再起動中...');
+    stopCamera();
+    frameBuffer = []; scoreHistory = []; batchPending = false;
+    try {
+      await startCamera();
+      setStatus('笑顔を検出中...');
+    } catch (e) {
+      setStatus(`カメラエラー: ${e.message}`, 'error');
+    }
+  }, 600);
+});
 
 // ============================================================
 // FRAME CAPTURE
