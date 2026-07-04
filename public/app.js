@@ -13,6 +13,11 @@ const CONFIG = {
   EXPOSURE:          0,     // EV: -2.0 〜 +2.0
 };
 
+// Peak detection constants
+const PEAK_CONFIRM = 2;    // ピーク後に何フレーム下降すれば確定とするか
+const PEAK_DROP    = 0.08; // ピークからこの値以上下がれば下降とみなす
+const HISTORY_MAX  = 20;   // scoreHistory の最大保持フレーム数
+
 // ============================================================
 // STATE
 // ============================================================
@@ -23,6 +28,7 @@ let isInCooldown   = false;
 let batchPending   = false;
 let frameIdCounter = 0;
 let frameBuffer        = [];
+let scoreHistory       = []; // {score, smiling, faces, dataUrl} のリスト
 let shotHistory        = [];
 let deviceList         = [];
 let activeDeviceId     = null;
@@ -61,13 +67,48 @@ const cooldownVal     = $('cooldown-val');
 const exposureRange   = $('exposure-range');
 const exposureVal     = $('exposure-val');
 const downloadBtn     = $('download-btn');
+const sendEmailBtn    = $('send-email-btn');
 
 const capCanvas = $('capture-canvas');
 const capCtx    = capCanvas.getContext('2d');
 const apiCanvas = $('api-canvas');
 const apiCtx    = apiCanvas.getContext('2d');
 
-// Canvas dimensions are set dynamically when camera starts (video.onloadedmetadata)
+// ============================================================
+// ORIENTATION HELPERS
+// iOS Safari は videoWidth/Height が端末回転後も変わらないため canvas 側で補正。
+// 向き検出 API の信頼性が低いため、横をデフォルトとして
+// vw < vh のとき常に横出力に回転する。
+// 回転方向のみ window.orientation で判定（取得不可なら -PI/2 をデフォルト）。
+// ============================================================
+function getOrientationAngle() {
+  // window.orientation は物理デバイス回転を反映（ページロックに依存しない）
+  if (typeof window.orientation === 'number') return ((window.orientation % 360) + 360) % 360;
+  if (typeof screen.orientation?.angle === 'number') return screen.orientation.angle;
+  return 0;
+}
+
+// canvas サイズを同期。vw < vh なら常に横出力に回転して true を返す。
+function syncCanvasDimensions() {
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  // 縦動画は常に横キャンバスに変換（横をデフォルト）
+  const rotated = vw > 0 && vh > 0 && vw < vh;
+  const cw = rotated ? vh : vw;
+  const ch = rotated ? vw : vh;
+  if (capCanvas.width !== cw || capCanvas.height !== ch) {
+    capCanvas.width  = cw;
+    capCanvas.height = ch;
+  }
+  const scale = Math.min(CONFIG.API_W / cw, CONFIG.API_H / ch);
+  const aw = Math.round(cw * scale);
+  const ah = Math.round(ch * scale);
+  if (apiCanvas.width !== aw || apiCanvas.height !== ah) {
+    apiCanvas.width  = aw;
+    apiCanvas.height = ah;
+  }
+  return rotated;
+}
 
 // ============================================================
 // CAMERA
@@ -87,13 +128,7 @@ async function startCamera() {
 
   return new Promise(resolve => {
     video.onloadedmetadata = () => {
-      const vw = video.videoWidth;
-      const vh = video.videoHeight;
-      capCanvas.width  = vw;
-      capCanvas.height = vh;
-      const scale = Math.min(CONFIG.API_W / vw, CONFIG.API_H / vh);
-      apiCanvas.width  = Math.round(vw * scale);
-      apiCanvas.height = Math.round(vh * scale);
+      syncCanvasDimensions();
       resolve();
     };
   });
@@ -146,22 +181,46 @@ async function switchCamera() {
 function captureFrame() {
   if (!isRunning || isInCooldown) return;
 
-  const frameId  = frameIdCounter++;
-  const bFilter  = CONFIG.EXPOSURE !== 0
+  const rotated = syncCanvasDimensions();
+  const vw      = video.videoWidth;
+  const vh      = video.videoHeight;
+
+  // 回転方向: window.orientation が取得できればそれを使用、不明なら -PI/2（左横）をデフォルト
+  let rot = -Math.PI / 2;
+  if (rotated) {
+    const angle = getOrientationAngle();
+    if (angle === 270) rot = Math.PI / 2;
+    // angle === 0 (取得不可) のときも -PI/2 のままで OK
+  }
+
+  const bFilter = CONFIG.EXPOSURE !== 0
     ? `brightness(${Math.round(Math.pow(2, CONFIG.EXPOSURE) * 100)}%)`
     : 'none';
 
-  capCtx.filter = bFilter;
-  capCtx.drawImage(video, 0, 0, capCanvas.width, capCanvas.height);
-  capCtx.filter = 'none';
+  function drawToCanvas(ctx, cw, ch) {
+    if (rotated) {
+      const s = cw / vh;
+      ctx.save();
+      ctx.translate(cw / 2, ch / 2);
+      ctx.rotate(rot);
+      ctx.filter = bFilter;
+      ctx.drawImage(video, -(vw * s) / 2, -(vh * s) / 2, vw * s, vh * s);
+      ctx.filter = 'none';
+      ctx.restore();
+    } else {
+      ctx.filter = bFilter;
+      ctx.drawImage(video, 0, 0, cw, ch);
+      ctx.filter = 'none';
+    }
+  }
+
+  drawToCanvas(capCtx, capCanvas.width, capCanvas.height);
   const fullDataUrl = capCanvas.toDataURL('image/jpeg', CONFIG.PHOTO_QUALITY);
 
-  apiCtx.filter = bFilter;
-  apiCtx.drawImage(video, 0, 0, apiCanvas.width, apiCanvas.height);
-  apiCtx.filter = 'none';
+  drawToCanvas(apiCtx, apiCanvas.width, apiCanvas.height);
   const apiBase64 = apiCanvas.toDataURL('image/jpeg', CONFIG.API_QUALITY).split(',')[1];
 
-  frameBuffer.push({ id: frameId, fullDataUrl, apiBase64, ts: Date.now() });
+  frameBuffer.push({ id: frameIdCounter++, fullDataUrl, apiBase64, ts: Date.now() });
   if (frameBuffer.length > CONFIG.BATCH_SIZE * 2) frameBuffer.shift();
 
   updateFrameCounter();
@@ -196,7 +255,7 @@ async function analyzeBatch(batch) {
       `  (2) "faces": total number of faces detected (0 if none)`,
       `  (3) "smiling": count of people clearly smiling (smile score > 0.5)`,
       `  (4) "kanpai": true if people appear to be raising glasses or cups for a toast, false otherwise`,
-`  (5) "obstructed": true if a hand, arm, or object is directly blocking/covering faces or the camera lens in this frame, false otherwise`,
+      `  (5) "obstructed": true if a hand, arm, or object is directly blocking/covering faces or the camera lens in this frame, false otherwise`,
       `Reply ONLY with valid JSON — no markdown, no explanation:`,
       `{"scores":[${Array(batch.length).fill('0.0').join(',')}],"faces":[${Array(batch.length).fill('0').join(',')}],"smiling":[${Array(batch.length).fill('0').join(',')}],"kanpai":[${Array(batch.length).fill('false').join(',')}],"obstructed":[${Array(batch.length).fill('false').join(',')}]}`,
     ].join('\n'),
@@ -219,7 +278,6 @@ async function analyzeBatch(batch) {
     const data = await res.json();
     const raw  = data.content?.[0]?.text?.trim() ?? '';
 
-    // Haikuが前後にテキストを足してもJSONブロックだけ抽出する
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error(`想定外のレスポンス: ${raw.slice(0, 80)}`);
 
@@ -236,15 +294,15 @@ async function analyzeBatch(batch) {
     const kanpai  = Array.isArray(parsed.kanpai)
       ? parsed.kanpai.map(k => k === true || k === 'true')
       : scores.map(() => false);
-const obstructed = Array.isArray(parsed.obstructed)
-? parsed.obstructed.map(o => o === true || o === 'true')
-: scores.map(() => false);
+    const obstructed = Array.isArray(parsed.obstructed)
+      ? parsed.obstructed.map(o => o === true || o === 'true')
+      : scores.map(() => false);
 
     onBatchResult(scores, smiling, faces, kanpai, obstructed, batch);
 
   } catch (e) {
     errorOccurred = true;
-    console.error('[analyzeBatch]', e.message);   // DevToolsで確認できる
+    console.error('[analyzeBatch]', e.message);
     if (isRunning) setStatus(`エラー: ${e.message}`, 'error');
   } finally {
     batchPending = false;
@@ -253,7 +311,6 @@ const obstructed = Array.isArray(parsed.obstructed)
       const next = frameBuffer.splice(0, CONFIG.BATCH_SIZE);
       analyzeBatch(next);
     } else if (isRunning && !isInCooldown && !errorOccurred) {
-      // エラー時はメッセージを上書きせず残す
       setStatus('笑顔を検出中...');
     }
   }
@@ -265,57 +322,71 @@ const obstructed = Array.isArray(parsed.obstructed)
 function onBatchResult(scores, smilingCounts, faceCounts, kanpaiFlags, obstructedFlags, batch) {
   if (!isRunning || scores.length === 0) return;
 
-  // ── スマイル判定 ──────────────────────────────────────────
-// まず全フレームの最高スコアを求める（メーター表示用）
-let bestScore = 0, bestIndex = 0, bestSmiling = 0, bestFaces = 0;
-scores.forEach((s, i) => {
-if (s > bestScore) {
-bestScore = s;
-bestIndex = i;
-bestSmiling = smilingCounts[i] ?? 0;
-bestFaces = faceCounts[i] ?? 0;
-}
-});
+  scores.forEach((s, i) => {
+    if (!(obstructedFlags[i] ?? false)) {
+      scoreHistory.push({
+        score:   s,
+        smiling: smilingCounts[i] ?? 0,
+        faces:   faceCounts[i]    ?? 0,
+        dataUrl: batch[i].fullDataUrl,
+      });
+    }
+  });
+  if (scoreHistory.length > HISTORY_MAX) {
+    scoreHistory.splice(0, scoreHistory.length - HISTORY_MAX);
+  }
 
-updateSmileBar(bestScore, bestSmiling, bestFaces);
+  let dispScore = 0, dispIdx = 0;
+  scores.forEach((s, i) => { if (s > dispScore) { dispScore = s; dispIdx = i; } });
+  updateSmileBar(dispScore, smilingCounts[dispIdx] ?? 0, faceCounts[dispIdx] ?? 0);
 
-if (!isInCooldown && bestScore >= CONFIG.SMILE_THRESHOLD) {
-// 閾値以上のフレームから「顔検出数→笑顔数→スコア」の優先順で最適フレームを選ぶ
-// 顔が画角外・暗い・傾いている誤検知フレームを避けるため
-let photoIndex = bestIndex, photoScore = bestScore;
-let photoSmiling = bestSmiling, photoFaces = bestFaces;
-// Check if any above-threshold frame is not obstructed
-const hasCleanFrame = scores.some((s, i) => s >= CONFIG.SMILE_THRESHOLD && !(obstructedFlags[i] ?? false));
-scores.forEach((s, i) => {
-if (s < CONFIG.SMILE_THRESHOLD) return;
-// Skip obstructed frames if a clean alternative exists
-if (hasCleanFrame && (obstructedFlags[i] ?? false)) return;
-const fc = faceCounts[i] ?? 0;
-const sc = smilingCounts[i] ?? 0;
-const better =
-fc > photoFaces ||
-(fc === photoFaces && sc > photoSmiling) ||
-(fc === photoFaces && sc === photoSmiling && s > photoScore);
-if (better) { photoIndex = i; photoScore = s; photoSmiling = sc; photoFaces = fc; }
-});
-triggerShutter(batch[photoIndex].fullDataUrl, photoScore, photoFaces > 0 ? Math.min(Math.max(1, photoSmiling), photoFaces) : Math.max(1, photoSmiling), photoFaces);
-}
-// ─────────────────────────────────────────────────────────
+  if (!isInCooldown) tryPeakShutter();
 
-  // 乾杯検知（既存処理とは独立。エラーが出ても既存処理に影響しない）
   try {
     const kanpaiIdx = Array.isArray(kanpaiFlags)
       ? kanpaiFlags.findIndex(k => k === true)
       : -1;
     if (!isInCooldown && kanpaiIdx >= 0) {
-      const kScore   = scores[kanpaiIdx]        ?? bestScore;
-      const kSmiling = smilingCounts[kanpaiIdx] ?? bestSmiling;
-      const kFaces   = faceCounts[kanpaiIdx]    ?? bestFaces;
+      const kScore   = scores[kanpaiIdx]        ?? dispScore;
+      const kSmiling = smilingCounts[kanpaiIdx] ?? 0;
+      const kFaces   = faceCounts[kanpaiIdx]    ?? 0;
       triggerShutter(batch[kanpaiIdx].fullDataUrl, kScore, Math.max(1, kSmiling), kFaces, 'kanpai');
     }
   } catch (e) {
     console.warn('[kanpai]', e.message);
   }
+}
+
+// ============================================================
+// PEAK DETECTION
+// 複合スコア = score + min(smiling人数, 5) × 0.1 でピーク選択。
+// シャッター作動の閾値判定は必ず生スコアで行う（複数人ボーナスによる誤作動を防ぐ）。
+// ============================================================
+function peakMetric(entry) {
+  return entry.score + Math.min(entry.smiling, 5) * 0.1;
+}
+
+function tryPeakShutter() {
+  const h = scoreHistory;
+  if (h.length < PEAK_CONFIRM + 2) return;
+
+  const searchEnd = h.length - PEAK_CONFIRM;
+  let peakIdx = 0, peakVal = 0;
+  for (let i = 0; i < searchEnd; i++) {
+    const m = peakMetric(h[i]);
+    if (m > peakVal) { peakVal = m; peakIdx = i; }
+  }
+
+  if (h[peakIdx].score < CONFIG.SMILE_THRESHOLD) return;
+
+  for (let i = peakIdx + 1; i < h.length; i++) {
+    if (peakMetric(h[i]) >= peakVal - PEAK_DROP) return;
+  }
+
+  const peak    = h[peakIdx];
+  const smiling = peak.smiling > 0 ? peak.smiling : 1;
+  triggerShutter(peak.dataUrl, peak.score, smiling, peak.faces);
+  scoreHistory = [];
 }
 
 // ============================================================
@@ -325,6 +396,7 @@ function triggerShutter(dataUrl, score, smiling = 1, faces = 0, reason = 'smile'
   if (isInCooldown) return;
   isInCooldown = true;
   frameBuffer  = [];
+  scoreHistory = [];
 
   triggerFlash();
   cameraWrapper.classList.add('pulse');
@@ -335,7 +407,8 @@ function triggerShutter(dataUrl, score, smiling = 1, faces = 0, reason = 'smile'
   shotHistory.unshift({ dataUrl, score, smiling, faces, ts: Date.now() });
   if (shotHistory.length > 10) shotHistory.pop();
   updateBestShot();
-  if (downloadBtn) downloadBtn.disabled = false;
+  if (downloadBtn)  downloadBtn.disabled  = false;
+  if (sendEmailBtn) sendEmailBtn.disabled = false;
 
   setBadge('cooldown');
   const cooldownSec  = `${(CONFIG.COOLDOWN_MS / 1000).toFixed(1)}秒後に再開`;
@@ -348,6 +421,7 @@ function triggerShutter(dataUrl, score, smiling = 1, faces = 0, reason = 'smile'
   setTimeout(() => {
     if (!isRunning) return;
     isInCooldown = false;
+    scoreHistory = [];
     setBadge('running');
     setStatus('笑顔を検出中...');
   }, CONFIG.COOLDOWN_MS);
@@ -366,10 +440,10 @@ function updateBestShot() {
   bestShotSection.style.display = '';
 
   const best = [...shotHistory].sort((a, b) => {
-if (b.smiling !== a.smiling) return b.smiling - a.smiling;
-if ((b.faces ?? 0) !== (a.faces ?? 0)) return (b.faces ?? 0) - (a.faces ?? 0);
-return b.score - a.score;
-})[0];
+    if (b.smiling !== a.smiling) return b.smiling - a.smiling;
+    if ((b.faces ?? 0) !== (a.faces ?? 0)) return (b.faces ?? 0) - (a.faces ?? 0);
+    return b.score - a.score;
+  })[0];
 
   bestShotCard.innerHTML = '';
   const img   = Object.assign(document.createElement('img'), { src: best.dataUrl, alt: 'ベストショット' });
@@ -447,7 +521,7 @@ async function startDetection() {
     return;
   }
   isRunning = true; isInCooldown = false; batchPending = false;
-  frameIdCounter = 0; frameBuffer = [];
+  frameIdCounter = 0; frameBuffer = []; scoreHistory = [];
   startBtn.style.display        = 'none';
   stopBtn.style.display         = '';
   manualBtn.disabled            = false;
@@ -468,12 +542,73 @@ function stopDetection() {
   stopBtn.style.display         = 'none';
   manualBtn.disabled            = true;
   cameraSwitchBtn.style.display = 'none';
-  frameBuffer = []; batchPending = false;
+  frameBuffer = []; batchPending = false; scoreHistory = [];
   setBadge('idle');
   setStatus('停止しました');
   updateSmileBar(0);
   smileScoreTxt.textContent = '--';
   apiIndicator.textContent  = '';
+}
+
+// ============================================================
+// EMAIL
+// ============================================================
+function resizeForEmail(dataUrl, maxWidth = 800) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      const scale  = Math.min(1, maxWidth / img.width);
+      const canvas = document.createElement('canvas');
+      canvas.width  = Math.round(img.width  * scale);
+      canvas.height = Math.round(img.height * scale);
+      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL('image/jpeg', 0.82));
+    };
+    img.src = dataUrl;
+  });
+}
+
+async function sendEmail() {
+  if (shotHistory.length === 0 || !sendEmailBtn) return;
+  const origText = sendEmailBtn.textContent;
+  sendEmailBtn.disabled = true;
+  sendEmailBtn.textContent = '⏳ 送信中...';
+
+  try {
+    const shots = await Promise.all(
+      shotHistory.map(async s => ({
+        dataUrl: await resizeForEmail(s.dataUrl),
+        score:   s.score,
+        smiling: s.smiling,
+        faces:   s.faces ?? 0,
+      }))
+    );
+
+    const res = await fetch('/api/send-email', {
+      method:  'POST',
+      headers: { 'content-type': 'application/json' },
+      body:    JSON.stringify({ shots }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `HTTP ${res.status}`);
+    }
+
+    sendEmailBtn.textContent = '✓ 送信済み';
+    setTimeout(() => {
+      sendEmailBtn.textContent = origText;
+      sendEmailBtn.disabled = shotHistory.length === 0;
+    }, 3000);
+  } catch (e) {
+    console.error('[sendEmail]', e.message);
+    sendEmailBtn.textContent = '✗ 送信失敗';
+    setStatus(`メール送信エラー: ${e.message}`, 'error');
+    setTimeout(() => {
+      sendEmailBtn.textContent = origText;
+      sendEmailBtn.disabled = false;
+    }, 3000);
+  }
 }
 
 // ============================================================
@@ -495,7 +630,8 @@ clearBtn.addEventListener('click', () => {
   shotHistory = [];
   bestShotSection.style.display = 'none';
   bestShotCard.innerHTML = '';
-  if (downloadBtn) downloadBtn.disabled = true;
+  if (downloadBtn)  downloadBtn.disabled  = true;
+  if (sendEmailBtn) sendEmailBtn.disabled = true;
 });
 
 thresholdRange.addEventListener('input', () => {
@@ -522,11 +658,12 @@ if (exposureRange) exposureRange.addEventListener('input', () => {
   CONFIG.EXPOSURE = parseFloat(exposureRange.value);
   const sign = CONFIG.EXPOSURE > 0 ? '+' : '';
   exposureVal.textContent = `${sign}${CONFIG.EXPOSURE.toFixed(1)}`;
-  // CSS filter: video preview
   video.style.filter = CONFIG.EXPOSURE !== 0
     ? `brightness(${Math.round(Math.pow(2, CONFIG.EXPOSURE) * 100)}%)`
     : '';
 });
+
+if (sendEmailBtn) sendEmailBtn.addEventListener('click', sendEmail);
 
 // ============================================================
 // DOWNLOAD SESSION
@@ -572,7 +709,6 @@ if (downloadBtn) downloadBtn.addEventListener('click', async () => {
       }).click();
       setTimeout(() => URL.revokeObjectURL(url), 10000);
     } else {
-      // Fallback: JSON summary only (JSZip not loaded)
       const blob = new Blob([JSON.stringify(summary, null, 2)], { type: 'application/json' });
       const url  = URL.createObjectURL(blob);
       Object.assign(document.createElement('a'), {

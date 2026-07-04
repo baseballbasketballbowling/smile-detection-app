@@ -362,7 +362,7 @@ h1 {
 #best-shot-card img {
   width: 100%;
   display: block;
-  aspect-ratio: 3/4;
+  aspect-ratio: 16/9;
   object-fit: cover;
 }
 .best-shot-badge {
@@ -437,10 +437,8 @@ h1 {
 .gallery-item:hover { border-color: var(--accent); }
 .gallery-item img {
   width: 100%;
-  aspect-ratio: 4/3;
-  object-fit: cover;
   display: block;
-  aspect-ratio: 3 / 4;
+  aspect-ratio: 16/9;
   object-fit: cover;
 }
 .gallery-item-info {
@@ -562,17 +560,17 @@ h1 {
     gap: 10px;
   }
 
-  /* Gallery grid: 2-column on mobile */
+  /* Gallery grid: single column on mobile to match best shot width */
   #gallery-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
+    display: flex;
+    flex-direction: column;
     gap: 8px;
     flex: none;
     overflow: visible;
     height: auto;
   }
 
-  /* Best shot wider */
+  /* Best shot same 16/9 landscape */
   #best-shot-card img { aspect-ratio: 16/9; }
 }
 

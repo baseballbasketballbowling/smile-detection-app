@@ -4,6 +4,16 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Smile Shutter</title>
+
+  <!-- PWA / ホーム画面追加対応 -->
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="/api/icon">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Smile Shutter">
+  <meta name="theme-color" content="#0d0d0f">
+
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -11,7 +21,7 @@
 
     <header id="header">
       <div class="header-left">
-        <h1>Smile Shutter <span class="version-tag">v1.1</span></h1>
+        <h1>Smile Shutter <span class="version-tag">v1.3</span></h1>
         <span id="status-badge" class="badge badge-idle">待機中</span>
       </div>
       <div class="header-right">
@@ -76,7 +86,8 @@
 
         <div class="gallery-header">
           <h2>撮影履歴</h2>
-        <button id="download-btn" class="btn btn-ghost" disabled>⬇ ダウンロード</button>
+          <button id="download-btn"  class="btn btn-ghost" disabled>⬇ ダウンロード</button>
+          <button id="send-email-btn" class="btn btn-ghost" disabled>📧 メール送信</button>
           <button id="clear-btn" class="btn btn-ghost">クリア</button>
         </div>
         <div id="gallery-grid"></div>
