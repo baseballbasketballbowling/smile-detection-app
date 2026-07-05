@@ -119,9 +119,11 @@ function syncCanvasDimensions() {
 // CAMERA
 // ============================================================
 async function startCamera() {
+  // 最大解像度を要求（4K対応カメラなら4K、非対応なら最大値にフォールバック）
+  const hiRes = { width: { ideal: 3840 }, height: { ideal: 2160 } };
   const videoConstraints = (currentDeviceIndex >= 0 && deviceList[currentDeviceIndex])
-    ? { deviceId: { exact: deviceList[currentDeviceIndex].deviceId } }
-    : { facingMode, width: { ideal: 1920 }, height: { ideal: 1080 } };
+    ? { deviceId: { exact: deviceList[currentDeviceIndex].deviceId }, ...hiRes }
+    : { facingMode, ...hiRes };
 
   const stream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints, audio: false });
   video.srcObject = stream;
