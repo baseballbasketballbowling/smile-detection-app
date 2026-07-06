@@ -14,8 +14,9 @@ const CONFIG = {
 };
 
 // Peak detection constants
-const PEAK_CONFIRM = 2;    // ピーク後に何フレーム下降すれば確定とするか
+const PEAK_CONFIRM = 2;    // 直近何フレームが下降していればピーク確定とするか
 const PEAK_DROP    = 0.08; // ピークからこの値以上下がれば下降とみなす
+const PEAK_FORCE   = 8;    // ピークからこのフレーム数経過したら下降待ちせず撮影（笑顔が続く場合）
 const HISTORY_MAX  = 20;   // scoreHistory の最大保持フレーム数
 
 // ============================================================
@@ -409,6 +410,12 @@ function onBatchResult(scores, smilingCounts, faceCounts, kanpaiFlags, obstructe
 // PEAK DETECTION
 // 複合スコア = score + min(smiling人数, 5) × 0.1 でピーク選択。
 // シャッター作動の閾値判定は必ず生スコアで行う（複数人ボーナスによる誤作動を防ぐ）。
+//
+// 確定条件（いずれか）:
+//  A) 直近 PEAK_CONFIRM フレームがすべて peakVal - PEAK_DROP を下回る（笑顔が終わった）
+//     ※途中の緩やかな下降は問わない。「全フレーム下降」を要求すると
+//     ピーク直後の近傍フレーム（差が小さい）のせいで永遠に確定しない。
+//  B) ピークから PEAK_FORCE フレーム経過（笑顔が続いていてもベストフレームで撮影）
 // ============================================================
 function peakMetric(entry) {
   return entry.score + Math.min(entry.smiling, 5) * 0.1;
@@ -427,9 +434,16 @@ function tryPeakShutter() {
 
   if (h[peakIdx].score < CONFIG.SMILE_THRESHOLD) return;
 
-  for (let i = peakIdx + 1; i < h.length; i++) {
-    if (peakMetric(h[i]) >= peakVal - PEAK_DROP) return;
+  // 条件A: 直近 PEAK_CONFIRM フレームがすべて十分下降
+  let dropped = true;
+  for (let i = h.length - PEAK_CONFIRM; i < h.length; i++) {
+    if (peakMetric(h[i]) >= peakVal - PEAK_DROP) { dropped = false; break; }
   }
+
+  // 条件B: ピークから十分なフレーム数が経過（笑顔継続中でも撮る）
+  const sustained = (h.length - 1 - peakIdx) >= PEAK_FORCE;
+
+  if (!dropped && !sustained) return;
 
   const peak    = h[peakIdx];
   const smiling = peak.smiling > 0 ? peak.smiling : 1;
