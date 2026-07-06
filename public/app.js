@@ -115,12 +115,36 @@ function syncCanvasDimensions() {
   return rotated;
 }
 
+// 現在のビデオフレームを回転考慮で capCanvas に描画し dataURL を返す。
+// 自動/手動シャッター共通で使う（手動の引き伸ばしバグ防止）。
+function captureStillDataUrl(quality = CONFIG.PHOTO_QUALITY) {
+  const rotated = syncCanvasDimensions();
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  const cw = capCanvas.width;
+  const ch = capCanvas.height;
+  if (rotated) {
+    const angle = getOrientationAngle();
+    const rot   = angle === 270 ? Math.PI / 2 : -Math.PI / 2;
+    const s     = cw / vh;
+    capCtx.save();
+    capCtx.translate(cw / 2, ch / 2);
+    capCtx.rotate(rot);
+    capCtx.drawImage(video, -(vw * s) / 2, -(vh * s) / 2, vw * s, vh * s);
+    capCtx.restore();
+  } else {
+    capCtx.drawImage(video, 0, 0, cw, ch);
+  }
+  return capCanvas.toDataURL('image/jpeg', quality);
+}
+
 // ============================================================
 // CAMERA
 // ============================================================
 async function startCamera() {
-  // 最大解像度を要求（4K対応カメラなら4K、非対応なら最大値にフォールバック）
-  const hiRes = { width: { ideal: 3840 }, height: { ideal: 2160 } };
+  // 1080pを要求。注意：4Kを要求すると iOS が 4:3 フルセンサー（広角）に切り替わり、
+  // 顔が小さく写って笑顔スコアが閾値に届かなくなる（v1.6でシャッター不作動の原因）。
+  const hiRes = { width: { ideal: 1920 }, height: { ideal: 1080 } };
   const videoConstraints = (currentDeviceIndex >= 0 && deviceList[currentDeviceIndex])
     ? { deviceId: { exact: deviceList[currentDeviceIndex].deviceId }, ...hiRes }
     : { facingMode, ...hiRes };
@@ -644,8 +668,8 @@ cameraSwitchBtn.addEventListener('click', switchCamera);
 
 manualBtn.addEventListener('click', () => {
   if (!isRunning || isInCooldown) return;
-  capCtx.drawImage(video, 0, 0, capCanvas.width, capCanvas.height);
-  triggerShutter(capCanvas.toDataURL('image/jpeg', 0.92), 1.0, 1);
+  // 自動シャッターと同じ回転考慮の描画を使う（引き伸ばし防止）
+  triggerShutter(captureStillDataUrl(0.92), 1.0, 1);
 });
 
 clearBtn.addEventListener('click', () => {
