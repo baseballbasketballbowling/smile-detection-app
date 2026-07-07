@@ -24,6 +24,10 @@ const KANPAI_MIN_FRAMES = 2;   // バッチ内でこのフレーム数以上 kan
 const KANPAI_MIN_FACES  = 2;   // 乾杯フレームに最低この人数の顔が必要
 const KANPAI_MIN_SCORE  = 0.5; // 乾杯フレームの最低笑顔スコア
 
+// 保存前検証・自動メール
+const VERIFY_MIN_SCORE = 0.6;  // 検証合格の最低笑顔スコア
+const AUTO_EMAIL_EVERY = 5;    // この枚数たまったら自動メール送信
+
 // ============================================================
 // STATE
 // ============================================================
@@ -36,6 +40,8 @@ let frameIdCounter = 0;
 let frameBuffer        = [];
 let scoreHistory       = []; // {score, smiling, faces, dataUrl} のリスト
 let shotHistory        = [];
+let unsentShots        = []; // 自動メール未送信のショット
+let autoEmailDisabled  = false; // 送信失敗（未設定等）で自動送信を停止
 let deviceList         = [];
 let activeDeviceId     = null;
 let currentDeviceIndex = -1;
@@ -82,10 +88,6 @@ const apiCtx    = apiCanvas.getContext('2d');
 
 // ============================================================
 // ORIENTATION HELPERS
-// 基本方針：端末回転を検知したらカメラを再起動し、向きに合った
-// ネイティブ解像度のストリームを取得する（画質劣化なし）。
-// それでもストリームが縦寸法のままの場合の保険として canvas 回転も残す。
-// window.orientation は物理回転を反映（iOSのポートレートロックに影響されない）。
 // ============================================================
 function getOrientationAngle() {
   if (typeof window.orientation === 'number') return ((window.orientation % 360) + 360) % 360;
@@ -94,7 +96,6 @@ function getOrientationAngle() {
 }
 
 // canvas サイズを現在の向きに同期し、横持ち回転が必要なら true を返す。
-// 縦持ち（angle=0/180）のときは回転しない：縦写真のままが正しい。
 function syncCanvasDimensions() {
   const vw    = video.videoWidth;
   const vh    = video.videoHeight;
@@ -105,7 +106,6 @@ function syncCanvasDimensions() {
   if (capCanvas.width !== cw || capCanvas.height !== ch) {
     capCanvas.width  = cw;
     capCanvas.height = ch;
-    // サイズ変更で context 設定がリセットされるため毎回再設定
     capCtx.imageSmoothingEnabled = true;
     capCtx.imageSmoothingQuality = 'high';
   }
@@ -122,7 +122,6 @@ function syncCanvasDimensions() {
 }
 
 // 現在のビデオフレームを回転考慮で capCanvas に描画し dataURL を返す。
-// 自動/手動シャッター共通で使う（手動の引き伸ばしバグ防止）。
 function captureStillDataUrl(quality = CONFIG.PHOTO_QUALITY) {
   const rotated = syncCanvasDimensions();
   const vw = video.videoWidth;
@@ -148,8 +147,7 @@ function captureStillDataUrl(quality = CONFIG.PHOTO_QUALITY) {
 // CAMERA
 // ============================================================
 async function startCamera() {
-  // 1080pを要求。注意：4Kを要求すると iOS が 4:3 フルセンサー（広角）に切り替わり、
-  // 顔が小さく写って笑顔スコアが閾値に届かなくなる（v1.6でシャッター不作動の原因）。
+  // 1080pを要求。4K要求は iOS が 4:3 広角に切り替わり検出精度が落ちるのでしない。
   const hiRes = { width: { ideal: 1920 }, height: { ideal: 1080 } };
   const videoConstraints = (currentDeviceIndex >= 0 && deviceList[currentDeviceIndex])
     ? { deviceId: { exact: deviceList[currentDeviceIndex].deviceId }, ...hiRes }
@@ -212,9 +210,7 @@ async function switchCamera() {
   }
 }
 
-// 端末回転を検知したらカメラを再起動。
-// 回転後に再取得すると iOS が向きに合ったネイティブ解像度のストリームを返すため、
-// canvas 回転による画質劣化や回転後の低解像度化を回避できる。
+// 端末回転を検知したらカメラを再起動（向きに合ったネイティブ解像度を取得）。
 let orientationRestartTimer = null;
 window.addEventListener('orientationchange', () => {
   if (!isRunning) return;
@@ -239,7 +235,6 @@ window.addEventListener('orientationchange', () => {
 function captureFrame() {
   if (!isRunning || isInCooldown) return;
 
-  // 毎フレームで canvas サイズを同期（端末回転時にも対応）
   const rotated = syncCanvasDimensions();
   const vw      = video.videoWidth;
   const vh      = video.videoHeight;
@@ -250,10 +245,9 @@ function captureFrame() {
     ? `brightness(${Math.round(Math.pow(2, CONFIG.EXPOSURE) * 100)}%)`
     : 'none';
 
-  // 横持ち回転時は canvas 中心で回転して描画、通常時はそのまま描画
   function drawToCanvas(ctx, cw, ch) {
     if (rotated) {
-      const s = cw / vh; // canvas 横幅 / 元ビデオ縦幅 = 尺度ファクター
+      const s = cw / vh;
       ctx.save();
       ctx.translate(cw / 2, ch / 2);
       ctx.rotate(rot);
@@ -288,7 +282,6 @@ function captureFrame() {
 
 // ============================================================
 // BATCH API CALL  (/api/analyze → Vercel serverless → Anthropic)
-// APIキーはサーバー側環境変数に格納。ブラウザには渡さない。
 // ============================================================
 async function analyzeBatch(batch) {
   batchPending = true;
@@ -400,10 +393,7 @@ function onBatchResult(scores, smilingCounts, faceCounts, kanpaiFlags, obstructe
 
   if (!isInCooldown) tryPeakShutter();
 
-  // 乾杯検知（誤作動防止の厳格ゲート）:
-  //  - バッチ内で KANPAI_MIN_FRAMES フレーム以上 kanpai 判定（単発の誤判定を排除）
-  //  - 当該フレームに KANPAI_MIN_FACES 人以上の顔（乾杯は複数人のシーン）
-  //  - 笑顔スコア KANPAI_MIN_SCORE 以上（天井やブレフレームを排除）
+  // 乾杯検知（厳格ゲート：複数フレーム・複数人・最低スコア）
   try {
     const kanpaiCount = Array.isArray(kanpaiFlags)
       ? kanpaiFlags.filter(k => k === true).length
@@ -427,14 +417,9 @@ function onBatchResult(scores, smilingCounts, faceCounts, kanpaiFlags, obstructe
 
 // ============================================================
 // PEAK DETECTION
-// 複合スコア = score + min(smiling人数, 5) × 0.1 でピーク選択。
-// シャッター作動の閾値判定は必ず生スコアで行う（複数人ボーナスによる誤作動を防ぐ）。
-//
 // 確定条件（いずれか）:
 //  A) 直近 PEAK_CONFIRM フレームがすべて peakVal - PEAK_DROP を下回る（笑顔が終わった）
-//     ※途中の緩やかな下降は問わない。「全フレーム下降」を要求すると
-//     ピーク直後の近傍フレーム（差が小さい）のせいで永遠に確定しない。
-//  B) ピークから PEAK_FORCE フレーム経過（笑顔が続いていてもベストフレームで撮影）
+//  B) ピークから PEAK_FORCE フレーム経過（笑顔継続中でもベストフレームで撮影）
 // ============================================================
 function peakMetric(entry) {
   return entry.score + Math.min(entry.smiling, 5) * 0.1;
@@ -454,13 +439,11 @@ function tryPeakShutter() {
   if (h[peakIdx].score < CONFIG.SMILE_THRESHOLD) return;
   if ((h[peakIdx].faces ?? 0) < 1) return; // 顔なしフレームでは撮らない
 
-  // 条件A: 直近 PEAK_CONFIRM フレームがすべて十分下降
   let dropped = true;
   for (let i = h.length - PEAK_CONFIRM; i < h.length; i++) {
     if (peakMetric(h[i]) >= peakVal - PEAK_DROP) { dropped = false; break; }
   }
 
-  // 条件B: ピークから十分なフレーム数が経過（笑顔継続中でも撮る）
   const sustained = (h.length - 1 - peakIdx) >= PEAK_FORCE;
 
   if (!dropped && !sustained) return;
@@ -472,22 +455,90 @@ function tryPeakShutter() {
 }
 
 // ============================================================
-// SHUTTER
+// SHUTTER + 保存前検証
 // ============================================================
-function triggerShutter(dataUrl, score, smiling = 1, faces = 0, reason = 'smile') {
+
+// 撮影した写真そのものを再検証（ブレ・顔なし・非笑顔の写真を保存前に弾く）
+async function verifyPhoto(dataUrl) {
+  try {
+    const small = await resizeForEmail(dataUrl, 640);
+    const b64   = small.split(',')[1];
+    const content = [
+      { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } },
+      {
+        type: 'text',
+        text: [
+          'This photo was auto-captured by a smile-detection camera. Strictly verify whether it is a keeper:',
+          '- at least one clear, sharp, well-lit human face',
+          '- that person is genuinely smiling',
+          '- not blurry, not sideways/rotated, face not obstructed',
+          'score = smile quality 0.0-1.0. If any condition fails, good=false.',
+          'Reply ONLY with valid JSON: {"good":true,"score":0.0,"reason":"short reason in Japanese"}',
+        ].join('\n'),
+      },
+    ];
+    const res = await fetch('/api/analyze', {
+      method:  'POST',
+      headers: { 'content-type': 'application/json' },
+      body:    JSON.stringify({ content }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const raw  = data.content?.[0]?.text?.trim() ?? '';
+    const m    = raw.match(/\{[\s\S]*\}/);
+    if (!m) throw new Error('想定外のレスポンス');
+    const p     = JSON.parse(m[0]);
+    const score = Math.min(1, Math.max(0, parseFloat(p.score) || 0));
+    return {
+      good:   p.good === true && score >= VERIFY_MIN_SCORE,
+      score,
+      reason: typeof p.reason === 'string' ? p.reason : '',
+    };
+  } catch (e) {
+    // 検証自体が失敗した場合は写真を失わないよう合格扱い
+    console.warn('[verifyPhoto]', e.message);
+    return { good: true, score: 0, reason: '' };
+  }
+}
+
+async function triggerShutter(dataUrl, score, smiling = 1, faces = 0, reason = 'smile') {
   if (isInCooldown) return;
   isInCooldown = true;
   frameBuffer  = [];
   scoreHistory = [];
 
+  // 手動撮影以外は、保存前に写真そのものを再検証する
+  if (reason !== 'manual') {
+    setBadge('cooldown');
+    setStatus('🔎 写真を検証中...');
+    const v = await verifyPhoto(dataUrl);
+    if (!v.good) {
+      setStatus(`検証NG: ${v.reason || '笑顔が確認できませんでした'} — 再検出します`);
+      setTimeout(() => {
+        if (!isRunning) return;
+        isInCooldown = false;
+        setBadge('running');
+        setStatus('笑顔を検出中...');
+      }, 1500);
+      return;
+    }
+    if (typeof v.score === 'number' && v.score > 0) score = Math.min(1, v.score);
+  }
+
+  commitShot(dataUrl, score, smiling, faces, reason);
+}
+
+function commitShot(dataUrl, score, smiling, faces, reason) {
   triggerFlash();
   cameraWrapper.classList.add('pulse');
   setTimeout(() => cameraWrapper.classList.remove('pulse'), 600);
 
   addToGallery(dataUrl, score, smiling, faces);
 
-  shotHistory.unshift({ dataUrl, score, smiling, faces, ts: Date.now() });
+  const shot = { dataUrl, score, smiling, faces, ts: Date.now() };
+  shotHistory.unshift(shot);
   if (shotHistory.length > 10) shotHistory.pop();
+  unsentShots.push(shot);
   updateBestShot();
   if (downloadBtn)  downloadBtn.disabled  = false;
   if (sendEmailBtn) sendEmailBtn.disabled = false;
@@ -497,8 +548,10 @@ function triggerShutter(dataUrl, score, smiling = 1, faces = 0, reason = 'smile'
   const smilingLabel = faces > 1 ? ` / ${smiling}人笑顔` : '';
   const statusMsg    = reason === 'kanpai'
     ? `🥂 乾杯を検知しました！  — ${cooldownSec}`
-    : `撮影完了！ ${Math.round(score * 100)}%${smilingLabel}  — ${cooldownSec}`;
+    : `✅ 撮影完了！ ${Math.round(score * 100)}%${smilingLabel}  — ${cooldownSec}`;
   setStatus(statusMsg);
+
+  maybeAutoEmail();
 
   setTimeout(() => {
     if (!isRunning) return;
@@ -650,6 +703,44 @@ function resizeForEmail(dataUrl, maxWidth = 800) {
   });
 }
 
+async function sendEmailCore(shots) {
+  const payload = await Promise.all(
+    shots.map(async s => ({
+      dataUrl: await resizeForEmail(s.dataUrl),
+      score:   s.score,
+      smiling: s.smiling,
+      faces:   s.faces ?? 0,
+    }))
+  );
+  const res = await fetch('/api/send-email', {
+    method:  'POST',
+    headers: { 'content-type': 'application/json' },
+    body:    JSON.stringify({ shots: payload }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+}
+
+// AUTO_EMAIL_EVERY 枚たまったら自動送信。
+// 失敗（Resend未設定など）したら以降の自動送信は停止（手動送信は可）。
+async function maybeAutoEmail() {
+  if (autoEmailDisabled || unsentShots.length < AUTO_EMAIL_EVERY) return;
+  const batch = unsentShots.splice(0, unsentShots.length);
+  try {
+    apiIndicator.textContent = '📧 自動送信中';
+    await sendEmailCore(batch);
+    apiIndicator.textContent = '📧 送信完了';
+    setTimeout(() => { if (!batchPending) apiIndicator.textContent = ''; }, 3000);
+  } catch (e) {
+    autoEmailDisabled = true;
+    console.error('[autoEmail]', e.message);
+    setStatus(`自動メール送信に失敗（${e.message}）— 自動送信を停止しました`, 'error');
+    apiIndicator.textContent = '';
+  }
+}
+
 async function sendEmail() {
   if (shotHistory.length === 0 || !sendEmailBtn) return;
   const origText = sendEmailBtn.textContent;
@@ -657,26 +748,8 @@ async function sendEmail() {
   sendEmailBtn.textContent = '⏳ 送信中...';
 
   try {
-    const shots = await Promise.all(
-      shotHistory.map(async s => ({
-        dataUrl: await resizeForEmail(s.dataUrl),
-        score:   s.score,
-        smiling: s.smiling,
-        faces:   s.faces ?? 0,
-      }))
-    );
-
-    const res = await fetch('/api/send-email', {
-      method:  'POST',
-      headers: { 'content-type': 'application/json' },
-      body:    JSON.stringify({ shots }),
-    });
-
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || `HTTP ${res.status}`);
-    }
-
+    await sendEmailCore(shotHistory);
+    unsentShots = []; // 手動送信したら未送信カウンタもリセット
     sendEmailBtn.textContent = '✓ 送信済み';
     setTimeout(() => {
       sendEmailBtn.textContent = origText;
@@ -702,14 +775,15 @@ cameraSwitchBtn.addEventListener('click', switchCamera);
 
 manualBtn.addEventListener('click', () => {
   if (!isRunning || isInCooldown) return;
-  // 自動シャッターと同じ回転考慮の描画を使う（引き伸ばし防止）
-  triggerShutter(captureStillDataUrl(0.92), 1.0, 1);
+  // 手動撮影は検証をスキップ（意図的な撮影のため）
+  triggerShutter(captureStillDataUrl(0.92), 1.0, 1, 0, 'manual');
 });
 
 clearBtn.addEventListener('click', () => {
   galleryGrid.innerHTML = '';
   galleryEmpty.style.display = '';
   shotHistory = [];
+  unsentShots = [];
   bestShotSection.style.display = 'none';
   bestShotCard.innerHTML = '';
   if (downloadBtn)  downloadBtn.disabled  = true;
