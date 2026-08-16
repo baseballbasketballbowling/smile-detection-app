@@ -16,7 +16,8 @@ const CONFIG = {
 // Peak detection constants
 const PEAK_CONFIRM = 2;    // 直近何フレームが下降していればピーク確定とするか
 const PEAK_DROP    = 0.08; // ピークからこの値以上下がれば下降とみなす
-const PEAK_FORCE   = 8;    // ピークからこのフレーム数経過したら下降待ちせず撮影（笑顔が続く場合）
+const PEAK_FORCE   = 4;    // ピークからこのフレーム数経過したら下降待ちせず撮影（笑顔が続く場合）
+const INSTANT_FIRE = 0.85; // このスコア以上の強い笑顔は待たず即シャッター
 const HISTORY_MAX  = 20;   // scoreHistory の最大保持フレーム数
 
 // 乾杯検知の誤作動防止ゲート
@@ -25,7 +26,7 @@ const KANPAI_MIN_FACES  = 2;   // 乾杯フレームに最低この人数の顔�
 const KANPAI_MIN_SCORE  = 0.5; // 乾杯フレームの最低笑顔スコア
 
 // 保存前検証・自動メール
-const VERIFY_MIN_SCORE = 0.6;  // 検証合格の最低笑顔スコア
+const VERIFY_MIN_SCORE = 0.5;  // 検証合格の最低笑顔スコア（明らかなゴミだけ弾く）
 const AUTO_EMAIL_EVERY = 5;    // この枚数たまったら自動メール送信
 
 // ============================================================
@@ -391,6 +392,18 @@ function onBatchResult(scores, smilingCounts, faceCounts, kanpaiFlags, obstructe
   gatedScores.forEach((s, i) => { if (s > dispScore) { dispScore = s; dispIdx = i; } });
   updateSmileBar(dispScore, smilingCounts[dispIdx] ?? 0, faceCounts[dispIdx] ?? 0);
 
+  // 即時発火：強い笑顔（INSTANT_FIRE以上）は下降待ちせずすぐ撮る
+  if (!isInCooldown) {
+    let instIdx = -1, instBest = 0;
+    gatedScores.forEach((s, i) => {
+      if (s >= INSTANT_FIRE && (faceCounts[i] ?? 0) >= 1 && s > instBest) { instBest = s; instIdx = i; }
+    });
+    if (instIdx >= 0) {
+      triggerShutter(batch[instIdx].fullDataUrl, gatedScores[instIdx],
+        Math.max(1, smilingCounts[instIdx] ?? 0), faceCounts[instIdx] ?? 0);
+    }
+  }
+
   if (!isInCooldown) tryPeakShutter();
 
   // 乾杯検知（厳格ゲート：複数フレーム・複数人・最低スコア）
@@ -420,6 +433,7 @@ function onBatchResult(scores, smilingCounts, faceCounts, kanpaiFlags, obstructe
 // 確定条件（いずれか）:
 //  A) 直近 PEAK_CONFIRM フレームがすべて peakVal - PEAK_DROP を下回る（笑顔が終わった）
 //  B) ピークから PEAK_FORCE フレーム経過（笑顔継続中でもベストフレームで撮影）
+//  ※ INSTANT_FIRE 以上の強い笑顔は onBatchResult 側で即時発火する
 // ============================================================
 function peakMetric(entry) {
   return entry.score + Math.min(entry.smiling, 5) * 0.1;
@@ -458,7 +472,7 @@ function tryPeakShutter() {
 // SHUTTER + 保存前検証
 // ============================================================
 
-// 撮影した写真そのものを再検証（ブレ・顔なし・非笑顔の写真を保存前に弾く）
+// 撮影した写真そのものを再検証（明らかなゴミだけを保存前に弾く）
 async function verifyPhoto(dataUrl) {
   try {
     const small = await resizeForEmail(dataUrl, 640);
@@ -468,11 +482,10 @@ async function verifyPhoto(dataUrl) {
       {
         type: 'text',
         text: [
-          'This photo was auto-captured by a smile-detection camera. Strictly verify whether it is a keeper:',
-          '- at least one clear, sharp, well-lit human face',
-          '- that person is genuinely smiling',
-          '- not blurry, not sideways/rotated, face not obstructed',
-          'score = smile quality 0.0-1.0. If any condition fails, good=false.',
+          'This photo was auto-captured by a smile-detection camera. Decide if it is worth keeping.',
+          'Set good=false ONLY if: no visible human face, OR severely blurry, OR nobody is smiling at all.',
+          'Otherwise good=true. Minor imperfections are fine - candid natural moments are the goal.',
+          'score = smile/moment quality 0.0-1.0.',
           'Reply ONLY with valid JSON: {"good":true,"score":0.0,"reason":"short reason in Japanese"}',
         ].join('\n'),
       },
@@ -519,7 +532,7 @@ async function triggerShutter(dataUrl, score, smiling = 1, faces = 0, reason = '
         isInCooldown = false;
         setBadge('running');
         setStatus('笑顔を検出中...');
-      }, 1500);
+      }, 2500);
       return;
     }
     if (typeof v.score === 'number' && v.score > 0) score = Math.min(1, v.score);
